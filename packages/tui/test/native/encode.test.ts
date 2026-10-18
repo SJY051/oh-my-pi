@@ -178,6 +178,33 @@ describe("TSP framing", () => {
 		expect(parseTspMessage('\x1b_tsp;e;{"ev":"change","sf":"s:1","id":"pf"}\x1b\\')).toBeNull();
 	});
 
+	it("decodes the el control change and the form values an action carries", () => {
+		// The event the Tern SDK shows for a radio click (protocol/index.md), plus the action that follows it.
+		const change = {
+			ev: "change",
+			sf: "pick",
+			id: "l.r",
+			value: "l",
+			checked: true,
+			name: "size",
+			values: { size: "l" },
+		};
+		const action = {
+			ev: "action",
+			sf: "pick",
+			id: "go",
+			act: "submit",
+			values: { size: "l", tags: ["a"], notify: true, none: null },
+		};
+		for (const event of [change, action]) {
+			const decoded: unknown = parseTspMessage(`\x1b_tsp;e;${JSON.stringify(event)}\x1b\\`);
+			expect(decoded).toEqual({ verb: "e", event });
+		}
+		// A control flip names its state; one that doesn't is not an el change nor a prefs change.
+		const { checked: _checked, ...unchecked } = change;
+		expect(parseTspMessage(`\x1b_tsp;e;${JSON.stringify(unchecked)}\x1b\\`)).toBeNull();
+	});
+
 	it("rejects malformed replies and events", () => {
 		expect(parseTspMessage('\x1b_tsp;r;{"r":"hello","v":1,"term":"tern"}\x1b\\')).toBeNull();
 		expect(parseTspMessage('\x1b_tsp;e;{"ev":"ack"}\x1b\\')).toBeNull();

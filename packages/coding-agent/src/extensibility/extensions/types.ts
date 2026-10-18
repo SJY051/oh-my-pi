@@ -83,7 +83,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
-import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
+import type { NativeToolView, ToolNativeEvent } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
@@ -836,6 +836,8 @@ export interface ToolRenderResultOptions {
 	isPartial: boolean;
 	/** Current spinner frame index for animated elements (optional) */
 	spinnerFrame?: number;
+	/** The call's id, to key state kept for an interactive card. Set for `describeCall`/`describeResult` only. */
+	toolCallId?: string;
 }
 
 /** Session event for tool onSession lifecycle */
@@ -936,7 +938,28 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		options: ToolRenderResultOptions,
 		args?: Static<TParams>,
 	) => NativeToolView | undefined;
+
+	/**
+	 * What the user does in an interactive card of this tool's
+	 * {@link describeCall}/{@link describeResult} view, on a terminal that draws
+	 * `el` nodes (Tern): a click on an `el` node that has `actions` (`action`) or a
+	 * flip of a checkbox/radio (`change`).
+	 * `event.toolCallId` names the call whose card the user acted on; only that
+	 * card's events reach this hook for it.
+	 * Runs with the extension context, so it can start a turn with
+	 * `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` or
+	 * `pi.sendUserMessage`. When it returns (or its promise settles) the card is
+	 * described again, so state it changed shows. A throw is logged and ignored.
+	 */
+	onNativeEvent?: (event: ToolNativeEvent, ctx: ExtensionContext) => void | Promise<void>;
 }
+
+export type {
+	ToolNativeActionEvent,
+	ToolNativeChangeEvent,
+	ToolNativeEvent,
+	ToolNativeEventBase,
+} from "@oh-my-pi/pi-tui/tools/renderer";
 
 /** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */
 export type SourceScope = "user" | "project" | "temporary";
@@ -1846,6 +1869,21 @@ export interface ExtensionAPI {
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
+	/**
+	 * Ask OMP to describe this extension's interactive tool cards again: all the
+	 * cards of `toolName` in the transcript, or only the one for `toolCallId`.
+	 * Use it when what a card shows changed outside its own `onNativeEvent`
+	 * (a background job wrote the file a preview reads, a timer fired), so the
+	 * `describeCall`/`describeResult` hooks run again and the card redraws.
+	 *
+	 * Only tools this extension registered are addressed; a tool that is not
+	 * its own, a name or id that no card shows, and a card that is gone are
+	 * ignored without error, as is any call in a mode with no transcript (print,
+	 * RPC). It returns at once, and calls made in one tick are coalesced into a
+	 * single description per card.
+	 */
+	redescribeToolCards(toolName: string, toolCallId?: string): void;
+
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
 
@@ -2103,6 +2141,8 @@ export type GetServiceTiersHandler = () => ServiceTierByFamily;
 
 export type SetServiceTierHandler = (family: ServiceTierFamily, tier: ServiceTier | undefined) => void;
 
+export type RedescribeToolCardsHandler = (toolName: string, toolCallId?: string) => void;
+
 /** Shared state created by loader, used during registration and runtime. */
 export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
@@ -2129,6 +2169,7 @@ export interface ExtensionActions {
 	setThinkingLevel: SetThinkingLevelHandler;
 	getServiceTiers?: GetServiceTiersHandler;
 	setServiceTier?: SetServiceTierHandler;
+	redescribeToolCards?: RedescribeToolCardsHandler;
 	getSessionName: () => string | undefined;
 	setSessionName: (name: string) => Promise<void>;
 }
@@ -2172,6 +2213,7 @@ export interface ExtensionCommandContextActions {
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
 	getServiceTiers: GetServiceTiersHandler;
 	setServiceTier: SetServiceTierHandler;
+	redescribeToolCards: RedescribeToolCardsHandler;
 }
 
 /** Loaded extension with all registered items. */

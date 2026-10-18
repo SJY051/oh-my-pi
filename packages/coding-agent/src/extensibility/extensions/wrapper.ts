@@ -26,7 +26,7 @@ import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
-import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
+import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult, ToolNativeEvent } from "./types";
 
 /**
  * Second `renderCall` argument that satisfies both the omp and the upstream-pi
@@ -76,6 +76,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 
 	renderCall?: (args: any, options: any, theme: any) => any;
 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;
+	onNativeEvent?: (event: ToolNativeEvent) => void | Promise<void>;
 	readonly loadMode: ToolLoadMode;
 
 	constructor(
@@ -104,6 +105,17 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 					{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
 					theme as Theme,
 					args,
+				);
+		}
+		// Same reason as above: a hook that is absent must stay absent, so the card knows the tool has none.
+		if (registeredTool.definition.onNativeEvent) {
+			// The user clicked in the tool's card, outside any tool call: its context is the tool's own, like a call's.
+			this.onNativeEvent = event =>
+				this.runner.runScoped(() =>
+					registeredTool.definition.onNativeEvent!(
+						event,
+						this.runner.createContext(undefined, { toolName: registeredTool.definition.name }),
+					),
 				);
 		}
 	}

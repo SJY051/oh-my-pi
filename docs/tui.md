@@ -178,6 +178,8 @@ These renderers are mounted by `ToolExecutionComponent`.
 
 On Tern Surface Protocol terminals, tools may additionally supply `describeCall(args, options)` and `describeResult(result, options, args?)`, returning a semantic `NativeToolView` or `undefined`. Custom components can implement `describe(cx)` and `handleNativeEvent(event)`; otherwise the native backend falls back to their rendered rows. See [the core renderer contract](./tui-core-renderer.md#native-rendering-tern-surface-protocol).
 
+A `NativeToolView` body may contain `el` nodes (HTML elements: forms, radios, checkboxes, buttons, tables) styled by the view's `sheet`; the extension tool's `onNativeEvent(event, ctx)` hook receives their clicks and control flips, and terminals that draw no `el` show the view's `fallback` text. See [Interactive tool views](./extensions.md#interactive-tool-views-tern-el).
+
 ## Lifecycle and cancellation
 
 - `dispose()` is optional at type level but should be implemented when you own timers, subprocesses, watchers, sockets, or overlays. It must be idempotent: containers propagate disposal, and reset/removal paths may converge.

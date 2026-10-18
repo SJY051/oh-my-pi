@@ -16,7 +16,15 @@ import { type TspApplyError, TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import { splitTspMessage, type TspHello } from "@oh-my-pi/pi-tui/native/encode";
 import type { Terminal, TerminalAppearance, TerminalStartOptions, TspHelloHandler } from "@oh-my-pi/pi-tui/terminal";
 import { type RenderScheduler, type RenderTimer, TUI } from "@oh-my-pi/pi-tui/tui";
-import { TSP_KINDS, type TspEvent, type TspFrame, type TspNode, type TspPalette } from "@oh-my-pi/pi-wire";
+import {
+	TSP_KINDS,
+	TSP_MAX_SURFACE_CSS_BYTES,
+	type TspEvent,
+	type TspFrame,
+	type TspNode,
+	type TspPalette,
+	type TspStyle,
+} from "@oh-my-pi/pi-wire";
 
 export interface TspHarnessOptions {
 	cols?: number;
@@ -119,6 +127,10 @@ export class TspTestTerminal implements Terminal {
 	readonly log: { verb: string; body: unknown }[] = [];
 	/** Palettes (`t`) received, in order. */
 	readonly palettes: TspPalette[] = [];
+	/** Stylesheets (`s`) the terminal holds per surface, by name. */
+	readonly sheets = new Map<string, Map<string, string>>();
+	/** Sheets the terminal refused for the surface's CSS limit. */
+	readonly rejectedSheets: string[] = [];
 	readonly errors: TspApplyError[] = [];
 	readonly blobs = new Map<string, Uint8Array>();
 	/** Non-TSP bytes written (row painting, cursor control). */
@@ -302,6 +314,20 @@ export class TspTestTerminal implements Terminal {
 			case "t":
 				this.palettes.push(JSON.parse(body) as TspPalette);
 				return;
+			case "s": {
+				const style = JSON.parse(body) as TspStyle;
+				const held = this.sheets.get(style.sf) ?? new Map<string, string>();
+				this.sheets.set(style.sf, held);
+				if (style.css) {
+					// Tern rejects a sheet that takes the surface past its CSS limit and changes nothing.
+					const others = [...held].filter(([name]) => name !== style.name);
+					const total =
+						others.reduce((sum, [, css]) => sum + Buffer.byteLength(css), 0) + Buffer.byteLength(style.css);
+					if (total > TSP_MAX_SURFACE_CSS_BYTES) this.rejectedSheets.push(style.name);
+					else held.set(style.name, style.css);
+				} else held.delete(style.name);
+				return;
+			}
 			case "q": {
 				const query = JSON.parse(body) as { q: string; ids?: string[] };
 				if (query.q !== "blobs" || this.#options.answerBlobs === false) return;

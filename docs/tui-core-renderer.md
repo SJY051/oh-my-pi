@@ -201,6 +201,10 @@ queue early. The
 debug socket's `doc` op returns the reference document
 (every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
 
+#### HTML elements and stylesheets (`el`, `s`)
+
+The `el` kind and the `s` (stylesheet) verb are optional: the optimistic start before the real `hello` never emits `el` (`UNASSUMED_KINDS`), a terminal that doesn't list `el` in `kinds` gets none, and `s` is sent only when `features` lists `styles`. A described node of kind `el` may carry `sheet`, CSS for its subtree. The node is the outer wrapper `.omp-<hash>` and `scopeStyleSheet` (`native/el.ts`) confines the tool's selectors below the element wearing `styleRootClass` (`scopedView` builds both); omp adds the clip/isolation rules only it can write for the wrapper. Equal text shares one installed sheet; it is sent before the frame that adds the first user and removed after the frame that deletes the last — or before the frame when the installs would not fit beside the sheets the terminal still holds — and a sheet is left out when the surface's 256 KiB CSS budget has no room. `Reconciler` also replaces any `el` node of a description with its text when the terminal lists no `el` kind, so no component can put one on the wire before the real `hello`. An `el` checkbox/radio `change` and an `action` inside a `form` carry `values` (the form's controls); they reach the describing component's `handleNativeEvent` as `{ type: "control", … }` and `{ type: "action", …, values }`. Tool views are untrusted input: `ToolExecutionComponent` runs them through `sanitizeElChildren` (tag and attribute allowlists, one 2 000-node budget for every node of the view, 24 levels, 64 KiB per sheet) and replaces `el` subtrees with the view's `fallback` (else `elFallbackText`) when the terminal can't draw them; see [Interactive tool views](./extensions.md#interactive-tool-views-tern-el).
+
 #### Explicit composer submission
 
 omp's `q: "hello"` advertises `features: ["edit", "undo", "send"]`.

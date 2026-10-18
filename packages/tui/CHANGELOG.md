@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added interactive tool cards on Tern: a tool's `describeResult` can return HTML-style `el` nodes (forms, radios, checkboxes, buttons) with a stylesheet confined and clipped to the card, and its extension hook `onNativeEvent` receives the clicks and control flips; terminals that draw no `el` show the view's `fallback` text, or the elements read as text
+- Added `ToolExecutionComponent.redescribe(ui, toolName, toolCallId?)`, a request that cards of a tool describe themselves again outside an `onNativeEvent`
+- `el` actions named `toggle`, `copy`, `open` or `zoom` are sent to Tern as `omp-reserved-<name>` (unless on an element with an `href` for `open`/`copy`) and delivered to `onNativeEvent` under the name the view wrote
+
 ## [18.12.1] - 2026-10-17
 
 ### Breaking Changes

@@ -121,6 +121,7 @@ Core methods:
 - `registerComposerShape`
 - `setLabel`, `getFlag`
 - `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
+- `redescribeToolCards` (see [Interactive tool views](#interactive-tool-views-tern-el))
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
@@ -728,7 +729,101 @@ Additional `ToolDefinition` fields include:
 - `mcpServerName`, `mcpToolName`, `legacyName`, `sourcePath`: discovery, approval, and provenance metadata.
 - `shellEnv`: environment values for the interactive user-shell surface.
 - `renderCall`, `renderResult`: TUI components.
-- `describeCall`, `describeResult`: semantic tool views for TSP terminals.
+- `describeCall`, `describeResult`: semantic tool views for TSP terminals; they may draw interactive `el` cards (see [Interactive tool views](#interactive-tool-views-tern-el)).
+- `onNativeEvent(event, ctx)`: receives the clicks and control flips of those cards.
+
+### Interactive tool views (Tern `el`)
+
+On [Tern](https://docs.stencil.so/tern/) (a Tern Surface Protocol terminal that lists the `el` kind in its `hello` reply), a tool's `describeResult` (or `describeCall`) can return HTML-style elements instead of a fixed card: a form with radios and checkboxes, buttons, a table of your own design, styled by CSS you supply. The card stays in the transcript, keeps working after the turn ends and after it scrolls away, and survives the redraws omp performs (resume, transcript rebuilds).
+
+```ts
+import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { el } from "@oh-my-pi/pi-tui/native/describe";
+
+export default function (pi: ExtensionAPI) {
+  const picked = new Map<string, string>(); // state of each card, by tool call id
+
+  pi.registerTool({
+    name: "ask_size",
+    label: "Ask size",
+    description: "Show the user a size picker",
+    parameters: pi.zod.object({}),
+    async execute() {
+      return { content: [{ type: "text", text: "Picker shown; wait for the user's answer." }] };
+    },
+    describeResult(_result, options) {
+      const current = picked.get(options.toolCallId ?? "");
+      return {
+        tool: { title: "Ask size" },
+        sheet: ".ask { display: flex; flex-direction: column; gap: 8px; padding: 8px } .ask :checked + span { color: var(--accent) }",
+        fallback: "Pick Small or Large, then Send.",
+        body: [
+          el("form", { class: "ask" }, [
+            ...(["s", "l"] as const).map(value =>
+              el("label", {}, [
+                el("input", { type: "radio", name: "size", value, checked: current === value }, undefined, `radio-${value}`),
+                el("span", { text: value === "s" ? "Small" : "Large" }),
+              ]),
+            ),
+            el("button", { text: "Send", actions: { click: "send" } }, undefined, "send"),
+          ]),
+        ],
+      };
+    },
+    onNativeEvent(event) {
+      if (event.type === "change") picked.set(event.toolCallId, event.value); // mirror what the user picked
+      if (event.type === "action" && event.act === "send") {
+        pi.sendMessage(
+          { customType: "ask-size", content: `Size: ${JSON.stringify(event.values)}`, display: true },
+          { deliverAs: "followUp", triggerTurn: true },
+        );
+      }
+    },
+  });
+}
+```
+
+**Building the view.** `el(tag, props, children, key?, sheet?)` (from `@oh-my-pi/pi-tui/native/describe`) makes one element. `tag` is one of `div span p section header footer nav aside main article figure blockquote ul ol li dl dt dd h1 h2 h3 h4 pre code kbd strong b em i del mark hr table thead tbody tr th td label button form input`; `input` is a checkbox or radio (`type`), never a text field. Props are `class`, `attrs` (`data-*`, `aria-*`, `role`, `colspan`, `rowspan` only), `text` (drawn before the children), `name`/`value`/`checked`/`disabled` for an `input`, and the common node props (`tone`, `hidden`, `title`, `aria`, `grow`, `actions`, …). `actions: { click: "name" }` (also `dblclick`, `menu`) makes any element clickable; `name` must not be `select` or `activate`: the terminal sends those as events of their own, which `onNativeEvent` does not receive. The full element reference is the Tern SDK's [HTML Elements](https://docs.stencil.so/tern/elements/el.md) page.
+
+**Reserved action names.** Tern performs `toggle`, `copy`, `open` and `zoom` itself and never reports a click that names one, so a button of yours called `open` would do nothing. omp therefore sends such an action of an `el` to the terminal as `omp-reserved-<name>` (`open=draft` becomes `omp-reserved-open=draft`; `click`, `dblclick` and every `menu` entry alike) and gives `onNativeEvent` the name you wrote: `event.act` is `"open"`, `event.value` is `"draft"`. Write the names you mean; nothing else changes. Two cases stay as written. `open` and `copy` on an element with an `href` are Tern's own built-in (open or copy the link), so they are sent unchanged and are not reported. And omp's own chrome (a card's head actions, its fold, the copy buttons) is not part of your view and is never renamed. Only `el` nodes are rewritten; the other node kinds in a view pass through as written. An action of yours that already starts with `omp-reserved-` is dropped and logged, so a name the terminal reports has one meaning.
+
+**Styling.** `NativeToolView.sheet` is the card's CSS (`describeCall` and `describeResult` each may bring one; they never share a scope). omp confines it before the terminal sees it, because Tern applies a program's sheet to the whole surface (transcript, composer, approval prompts):
+
+- every selector is rewritten to match only the card's root element or elements below it; `:root`, `html` and `body` at the start of a selector name the root element, and a selector that then leaves it through `+` or `~`, one that starts with a combinator, and one containing `&` are dropped;
+- a rule with a nested block (CSS nesting) is dropped, `@media` is kept inside the confinement, `@keyframes` pass through, and every other at-rule (`@import`, `@font-face`, `@supports`, …) is dropped;
+- a sheet omp can't be sure it reads the way Tern does is dropped whole and logged: unbalanced braces, a raw newline inside a string, an unterminated comment or string, a backslash escape outside a string, or any `url(`;
+- the card sits in a wrapper the tool's CSS can't select, which clips what the card paints (`overflow: clip`, `isolation: isolate`, `clip-path: inset(0)`, `position: relative`), so an oversized or offset root stays inside the card and can't cover or catch clicks meant for the messages and the composer.
+
+Tern itself drops `url()` and `position: fixed` and reports unsupported CSS. Cards whose `sheet` text is identical share one stylesheet. A terminal without the `styles` feature draws the elements with Tern's defaults.
+
+**Events.** `onNativeEvent(event, ctx)` runs, with the extension context, when the user clicks an element that has `actions`, or flips a checkbox/radio:
+
+| Field | Meaning |
+| --- | --- |
+| `type` | `"action"` (a click; `act` is the action name, `value` the part after `=` in `act=value`, `mods` the held modifier keys) or `"change"` (a control flip; `name`, `value`, `checked`) |
+| `toolCallId` | The call whose card was acted on. Each card's events reach only that call; keep per-card state in a `Map` keyed by it |
+| `key` | The acted-on node as the `/`-joined `key`s (index when a node has none) from the body down, e.g. `"form/send"`. Give every node you act on a key of your own; an empty key is ignored. When both `describeCall` and `describeResult` draw `el` nodes, keys must be unique across the two |
+| `values` | The enclosing `form`'s controls right then: a radio group gives its checked `value` (or `null`), a lone checkbox `true`/`false`, checkboxes sharing a name the checked `value`s |
+| `args`, `result` | The call's arguments and its result so far |
+
+When the hook returns (or its promise settles) omp describes the card again, so a view that reads its state from a `Map` shows the change without a new turn; `options.toolCallId` tells `describeResult` which card it is drawing. A thrown error is logged and ignored. An event reaches the hook only while its node is still part of the card: a click that was already on its way to a control a later description removed, and any event for a card that was disposed (a transcript rebuild or session switch replaced it), is dropped, and a handler that settles after disposal does not redescribe the card. A card that finished normally keeps working. Mirror `change` events into your state and render them as `checked`, or the terminal keeps the user's flip until you change the prop. After a session resume the card is described again from the stored result, with whatever state your extension rebuilt.
+
+**Describing a card again from outside an event.** When what a card shows changes without a click (a timer fired, a background job wrote the file a preview reads), ask omp to run `describeCall`/`describeResult` again:
+
+```ts
+pi.redescribeToolCards(toolName: string, toolCallId?: string): void
+```
+
+With `toolCallId`, only that call's card is described again; without it, every card of `toolName` in the transcript. Only tools this extension registered are addressed. The call returns at once and never throws: a tool that is not yours, a name or id no card shows, a card that is gone (disposed by a transcript rebuild), and a mode with no transcript (print, RPC) are all ignored. Keep the state your view reads in your own objects (a `Map` keyed by `toolCallId`), update it first, then ask:
+
+```ts
+setInterval(() => {
+  progress.set(id, readProgress());
+  pi.redescribeToolCards("build", id);
+}, 1000);
+```
+
+**Limits and degradation.** A view is held to 2 000 nodes, 24 levels and 64 KiB of CSS (the terminal allows 200 000 nodes, 64 levels and 256 KiB for the whole surface); one budget counts every node of the view, whatever its kind; nodes past a limit are dropped, an unknown tag draws as a `div`, attributes outside the list and the terminal's own `sf`/`sf-*` classes are removed, and an `el` `input` that is not a checkbox or radio is dropped. Where `el` cannot be drawn (a plain terminal, `PI_TUI_NATIVE=0`, a Tern build without the `el` kind, or before Tern's `hello` reply) the view shows `NativeToolView.fallback` in place of its `body`, or, without one, the elements read as text (`[x] Urgent`, `(•) Large`, `[Send]`, a text field as `[its text]`, an image as its `alt`); in a plain terminal the card's result text is replaced the same way. A tool whose view has no `el` nodes is unaffected. `el` draws no raw HTML and runs no JavaScript.
 
 ### File write fallback (`registerFileWriteFallback`)
 

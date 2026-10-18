@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the TSP `el` kind (HTML elements from a fixed tag list: `TspElProps`, `TSP_EL_TAGS`), the `s` stylesheet verb (`TspStyle`) and the surface limits `TSP_MAX_SURFACE_NODES`, `TSP_MAX_DEPTH`, `TSP_MAX_SURFACE_CSS_BYTES`; `action`, `select` and `activate` events carry the enclosing form's `values` (`TspFormValues`), and `el` checkboxes and radios send `change` events
+
 ## [18.10.2] - 2026-10-12
 
 ### Added

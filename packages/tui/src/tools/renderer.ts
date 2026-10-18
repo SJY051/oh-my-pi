@@ -3,7 +3,7 @@
  * transcript components. Built-in renderers live beside this file; the
  * coding-agent tools implement the matching `*Details` payloads.
  */
-import type { TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
+import type { TspFormValues, TspPreview, TspText, TspTone, TspToolProps } from "@oh-my-pi/pi-wire";
 import type { NativeChild } from "../native/node";
 import type { Component } from "../tui";
 import type { Theme } from "../theme/theme";
@@ -36,6 +36,8 @@ export interface RenderResultOptions {
 	cancelled?: boolean;
 	/** The native host shows files by path (`cx.supports("media")`). Native describe hooks only. */
 	media?: boolean;
+	/** The call's id, so a view can key state kept for an interactive card. Native describe hooks only. */
+	toolCallId?: string;
 }
 
 /** Render options for a result, plus the tool-specific context the transcript threads through. */
@@ -140,7 +142,64 @@ export interface NativeToolView {
 	readonly inline?: boolean;
 	/** Head actions offered on hover (`copy`, `retry`). */
 	readonly tools?: TspToolProps["tools"];
+	/**
+	 * CSS for the `el` nodes of {@link body}. Selectors are confined to the body
+	 * (`:root`, `html` and `body` name its root element) and cannot reach the
+	 * rest of the transcript; a rule with a nested block is dropped, and so is
+	 * the whole sheet if it can't be read safely (unbalanced braces, a raw
+	 * newline in a string, an escape, `url(`). The card's paint is clipped to
+	 * its own box. Terminals without the `styles` feature draw the `el` nodes
+	 * unstyled. At most 64 KiB.
+	 */
+	readonly sheet?: string;
+	/**
+	 * What terminals that draw no `el` (plain terminals, Tern builds without the
+	 * `el` kind) show in place of {@link body}. Absent, the `el` nodes read as
+	 * text stand in (labels, `[x]`/`( )` controls, `[Button]`s). In a plain
+	 * terminal it also replaces the result text of a tool that has no `renderResult`.
+	 */
+	readonly fallback?: string;
 }
+
+/**
+ * A user action on an interactive tool view (an `el` button, checkbox or radio),
+ * delivered to the tool's `onNativeEvent` hook.
+ */
+export interface ToolNativeEventBase {
+	/** The call whose card the user acted on; concurrent cards of one tool never share events. */
+	readonly toolCallId: string;
+	/**
+	 * The acted-on node, as the `/`-joined `key`s (else child indexes) from the
+	 * view's body down: `"form/send"` for the `send` child of the `form` child.
+	 */
+	readonly key: string;
+	/** The enclosing `form`'s controls at that moment (radio group → value or null, lone checkbox → boolean, shared name → string[]). */
+	readonly values?: TspFormValues;
+	/** The call's arguments. */
+	readonly args: unknown;
+	/** The call's result so far (`undefined` while pending). */
+	readonly result: ToolRenderResult | undefined;
+}
+
+/** A click on an `el` node whose `actions.click` (or `dblclick`/`menu`) names `act`. */
+export interface ToolNativeActionEvent extends ToolNativeEventBase {
+	readonly type: "action";
+	readonly act: string;
+	/** The part after `=` in an action named `act=value`. */
+	readonly value?: string;
+	/** Modifier keys held, in the order `shift`, `ctrl`, `alt`, `meta`. */
+	readonly mods: readonly string[];
+}
+
+/** A checkbox or radio flipped; `values` already shows the new pick. */
+export interface ToolNativeChangeEvent extends ToolNativeEventBase {
+	readonly type: "change";
+	readonly name?: string;
+	readonly value: string;
+	readonly checked: boolean;
+}
+
+export type ToolNativeEvent = ToolNativeActionEvent | ToolNativeChangeEvent;
 
 /**
  * A tool's transcript presentation: call preview, result view, and repaint/animation hints.

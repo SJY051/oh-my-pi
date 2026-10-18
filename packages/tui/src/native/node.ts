@@ -14,7 +14,7 @@
  * the Tern SDK's Surface Protocol reference (`docs/sdk/src/protocol` in the
  * Stencil repository, https://docs.stencil.so/tern/protocol/) for the spec.
  */
-import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
+import type { TspEvent, TspFormValues, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
 
 /** A described node: a wire node minus its id, with components allowed as children. */
@@ -44,6 +44,16 @@ export type NativeNode = {
 		 * each (`start`/`end` once). A freshly added node never scrolls.
 		 */
 		readonly scroll?: NativeScroll;
+		/**
+		 * `el` only: CSS for this node's subtree, installed before the frame that
+		 * adds the node and removed with its last user (equal sheets share one).
+		 * The node itself is the outer wrapper `.<name>` omp clips and isolates;
+		 * the tool's selectors are confined below the element wearing
+		 * `styleRootClass(name)`, which the caller puts inside (see `scopedView`
+		 * in `el.ts`, which builds both). Ignored by terminals without the
+		 * `styles` feature.
+		 */
+		readonly sheet?: string;
 	};
 }[TspKind];
 
@@ -117,8 +127,8 @@ export interface NativeScreen extends NativeSurface {
  */
 export type NativeUiEvent =
 	| { readonly type: "toggle"; readonly key: string; readonly collapsed: boolean }
-	| { readonly type: "select"; readonly key: string; readonly item: string }
-	| { readonly type: "activate"; readonly key: string; readonly item: string }
+	| { readonly type: "select"; readonly key: string; readonly item: string; readonly values?: TspFormValues }
+	| { readonly type: "activate"; readonly key: string; readonly item: string; readonly values?: TspFormValues }
 	| {
 			readonly type: "action";
 			readonly key: string;
@@ -126,6 +136,8 @@ export type NativeUiEvent =
 			/** Scope/tab/strip id, sort column, or the prefs row an action control belongs to. */
 			readonly value?: string;
 			readonly mods: readonly string[];
+			/** The enclosing `el` form's values, when the node sits in one. */
+			readonly values?: TspFormValues;
 	  }
 	/** A typed value changed by pointer (prefs rows, picker toggles); `null` resets to the default. */
 	| {
@@ -133,6 +145,15 @@ export type NativeUiEvent =
 			readonly key: string;
 			readonly item: string;
 			readonly value: boolean | number | string | readonly string[] | null;
+	  }
+	/** An `el` checkbox or radio flipped by pointer; `values` is its form's values after the flip. */
+	| {
+			readonly type: "control";
+			readonly key: string;
+			readonly name?: string;
+			readonly value: string;
+			readonly checked: boolean;
+			readonly values?: TspFormValues;
 	  }
 	/** An edit over the terminal's own selection in an `editor`/`input` node (see {@link NativeTextEdit}). */
 	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit)

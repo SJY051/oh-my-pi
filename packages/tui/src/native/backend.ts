@@ -205,9 +205,10 @@ function sameSet(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
 /**
  * Kinds newer than some Tern builds that answer `TERM_PROGRAM=tern`: used only
  * once the real `hello` lists them, so the optimistic start never emits a node
- * an older terminal cannot draw (`media`: files Tern loads by path).
+ * an older terminal cannot draw (`media`: files Tern loads by path; `el`: HTML
+ * elements).
  */
-const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true };
+const UNASSUMED_KINDS: Partial<Record<TspKind, true>> = { media: true, el: true };
 
 /**
  * The reply a v1 terminal is assumed to give before its real `hello` arrives
@@ -559,9 +560,20 @@ export class NativeBackend {
 		if (this.#stats) {
 			logger.debug("TSP frame", { sf: surface.id, ops: ops.length, rows: surface.reconciler.fallbackCount });
 		}
-		if (ops.length === 0) return;
-		this.#uploadBlobs(ops);
-		this.#sendFrame(surface, ops);
+		const styles = surface.reconciler.styles;
+		if (ops.length === 0 && styles.install.length === 0 && styles.remove.length === 0) return;
+		// A sheet reaches the terminal before the frame whose nodes wear it, and leaves after the frame that drops them.
+		const sendRemovals = (): void => {
+			for (const sheet of styles.remove) this.#write("s", { sf: surface.id, name: sheet.name, css: null });
+		};
+		// Removals go first only when the installs wouldn't fit beside the sheets the terminal still holds.
+		if (styles.removeFirst) sendRemovals();
+		for (const sheet of styles.install) this.#write("s", { sf: surface.id, name: sheet.name, css: sheet.css });
+		if (ops.length > 0) {
+			this.#uploadBlobs(ops);
+			this.#sendFrame(surface, ops);
+		}
+		if (!styles.removeFirst) sendRemovals();
 	}
 
 	/**
@@ -764,7 +776,7 @@ export class NativeBackend {
 		}
 	}
 
-	#write(verb: "o" | "f" | "t" | "x" | "q", body: unknown): void {
+	#write(verb: "o" | "f" | "t" | "s" | "x" | "q", body: unknown): void {
 		this.#record("out", verb, undefined, body);
 		this.#host.terminal.write(encodeTspJson(verb, body, undefined, this.#limit));
 	}
@@ -884,16 +896,34 @@ export class NativeBackend {
 				ui = { type: "toggle", key: target.keypath, collapsed: event.collapsed };
 				break;
 			case "select":
-				ui = { type: "select", key: target.keypath, item: item(event.item) };
+				ui = { type: "select", key: target.keypath, item: item(event.item), values: event.values };
 				break;
 			case "activate":
-				ui = { type: "activate", key: target.keypath, item: item(event.item) };
+				ui = { type: "activate", key: target.keypath, item: item(event.item), values: event.values };
 				break;
 			case "action":
-				ui = { type: "action", key: target.keypath, act: event.act, value: event.value, mods: event.mods ?? [] };
+				ui = {
+					type: "action",
+					key: target.keypath,
+					act: event.act,
+					value: event.value,
+					mods: event.mods ?? [],
+					values: event.values,
+				};
 				break;
 			case "change":
-				ui = { type: "change", key: target.keypath, item: event.item, value: event.value };
+				// A prefs row or picker toggle names an `item`; an `el` checkbox or radio has none.
+				ui =
+					event.item === undefined
+						? {
+								type: "control",
+								key: target.keypath,
+								name: event.name,
+								value: event.value,
+								checked: event.checked,
+								values: event.values,
+							}
+						: { type: "change", key: target.keypath, item: event.item, value: event.value };
 				break;
 			case "edit": {
 				const { from, to, text, cursor, len } = event;

@@ -8,8 +8,8 @@
  *     ESC _ tsp ; <verb> [; <key>=<value>]* ; <body> ESC \
  *
  * `body` is UTF-8 JSON (base64 for blob chunks). Program → terminal verbs:
- * `q` query, `o` open, `f` frame, `b` blob, `t` palette, `x` close. Terminal →
- * program: `r` reply, `e` event (on the pty's input side).
+ * `q` query, `o` open, `f` frame, `b` blob, `t` palette, `s` stylesheet, `x`
+ * close. Terminal → program: `r` reply, `e` event (on the pty's input side).
  *
  * The normative spec is the Tern SDK's Surface Protocol and Elements reference
  * (`docs/sdk/src/protocol` and `docs/sdk/src/elements` in the Stencil
@@ -28,7 +28,7 @@ export const TSP_DEFAULT_APC_LIMIT = 65_536;
 export const TSP_DEFAULT_CREDITS = 2;
 
 /** One-letter message verb. */
-export type TspVerb = "q" | "o" | "f" | "b" | "t" | "x" | "r" | "e";
+export type TspVerb = "q" | "o" | "f" | "b" | "t" | "s" | "x" | "r" | "e";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Vocabulary
@@ -79,6 +79,7 @@ export const TSP_KINDS = [
 	"chart",
 	"meter",
 	"effort",
+	"el",
 ] as const;
 
 export type TspKind = (typeof TSP_KINDS)[number];
@@ -818,6 +819,116 @@ export interface TspChartProps {
 	size?: "sm" | "md" | "lg";
 }
 
+// ─── HTML elements (`el`) and program stylesheets (`s`) ──────────────────
+
+/**
+ * The tags an `el` node may take (Tern SDK, `elements/el.md`, "Tags"). Any
+ * other tag draws as a `div` and the terminal reports an `error`.
+ */
+export const TSP_EL_TAGS = [
+	"div",
+	"span",
+	"p",
+	"section",
+	"header",
+	"footer",
+	"nav",
+	"aside",
+	"main",
+	"article",
+	"figure",
+	"blockquote",
+	"ul",
+	"ol",
+	"li",
+	"dl",
+	"dt",
+	"dd",
+	"h1",
+	"h2",
+	"h3",
+	"h4",
+	"pre",
+	"code",
+	"kbd",
+	"strong",
+	"b",
+	"em",
+	"i",
+	"del",
+	"mark",
+	"hr",
+	"table",
+	"thead",
+	"tbody",
+	"tr",
+	"th",
+	"td",
+	"label",
+	"button",
+	"form",
+	"input",
+] as const;
+
+export type TspElTag = (typeof TSP_EL_TAGS)[number];
+
+/** An `el` attribute value: tables, arrays and null are ignored by the terminal. */
+export type TspElAttr = string | number | boolean;
+
+/**
+ * One HTML element of a fixed tag list, styled by a program stylesheet. `input`
+ * draws a checkbox or radio (`type`), never a text field. Every
+ * {@link TspCommonProps} prop applies; `actions` makes the element a click
+ * target and, inside a `form`, its events carry the form's `values`.
+ */
+export interface TspElProps {
+	/** The element; defaults to `div`. */
+	tag?: TspElTag;
+	/** Space-separated class names for the program's stylesheets (`sf` and `sf-*` are the terminal's). */
+	class?: string;
+	/** Extra attributes: `data-*`, `aria-*`, `role`, `colspan`, `rowspan` only. */
+	attrs?: Readonly<Record<string, TspElAttr>>;
+	/** Plain text drawn before the children. */
+	text?: string;
+	/** `input` only: the control's type. */
+	type?: "checkbox" | "radio";
+	/** `input` only: its name in the form's `values` and its radio group. */
+	name?: string;
+	/** `input` only: the value it reports (default `"on"`). */
+	value?: string;
+	/** `input` only: the checked state the program sets; a change wins over the user's local flip. */
+	checked?: boolean;
+	/** `input` only: drawn dimmed, never flips, left out of `values`. */
+	disabled?: boolean;
+}
+
+/**
+ * The named controls of the `form` around an event's node, as drawn when it
+ * happened: a radio group gives the checked radio's value (`null` when none),
+ * a lone checkbox `true`/`false`, checkboxes sharing a name the checked values.
+ */
+export type TspFormValues = Readonly<Record<string, boolean | string | readonly string[] | null>>;
+
+/** Largest nodes a surface holds, root included. */
+export const TSP_MAX_SURFACE_NODES = 200_000;
+/** Deepest nesting a surface holds. */
+export const TSP_MAX_DEPTH = 64;
+/** Most bytes of CSS one surface holds, all its sheets together. */
+export const TSP_MAX_SURFACE_CSS_BYTES = 262_144;
+/** A stylesheet name: 1–64 of `A–Z a–z 0–9 _ -`. */
+export const TSP_STYLE_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * Verb `s`: install or replace stylesheet `name` of surface `sf`; a null or
+ * empty `css` removes it. Sent only when `hello.features` lists `styles`.
+ * Selectors are relative to the surface; the sheet stays with it after close.
+ */
+export interface TspStyle {
+	sf: string;
+	name: string;
+	css?: string | null;
+}
+
 /** Kind-specific props, indexed by kind. */
 export interface TspPropsByKind {
 	col: TspColProps;
@@ -863,6 +974,7 @@ export interface TspPropsByKind {
 	chart: TspChartProps;
 	meter: TspMeterProps;
 	effort: TspEffortProps;
+	el: TspElProps;
 }
 
 /** Props of a node of kind `K`: its kind-specific props plus the common ones. */
@@ -977,9 +1089,17 @@ export type TspEvent =
 	| { ev: "motion"; reduce: boolean }
 	| { ev: "visible"; sf?: string; visible: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
-	| { ev: "select"; sf: string; id: string; item: string }
-	| { ev: "activate"; sf: string; id: string; item: string }
-	| { ev: "action"; sf: string; id: string; act: string; value?: string; mods?: readonly string[] }
+	| { ev: "select"; sf: string; id: string; item: string; values?: TspFormValues }
+	| { ev: "activate"; sf: string; id: string; item: string; values?: TspFormValues }
+	| {
+			ev: "action";
+			sf: string;
+			id: string;
+			act: string;
+			value?: string;
+			mods?: readonly string[];
+			values?: TspFormValues;
+	  }
 	/** A typed value changed by pointer (prefs rows, picker toggles); `null` resets to the default. */
 	| {
 			ev: "change";
@@ -987,6 +1107,21 @@ export type TspEvent =
 			id: string;
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
+	  }
+	/**
+	 * An `el` checkbox or radio flipped by pointer: `id` the control, `value`
+	 * its value, `checked` its new state, `name` its name when it has one,
+	 * `values` the form's values after the flip when it sits in a `form`.
+	 */
+	| {
+			ev: "change";
+			sf: string;
+			id: string;
+			item?: undefined;
+			value: string;
+			checked: boolean;
+			name?: string;
+			values?: TspFormValues;
 	  }
 	/**
 	 * An edit over the terminal's selection in an `editor`/`input` node: replace
@@ -1016,5 +1151,5 @@ export type TspEvent =
 	 * keyboard focus there, or ignores it (a modal overlay keeps the keys).
 	 */
 	| { ev: "focus"; sf: string; id: string }
-	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
+	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string; sheet?: string; id?: string }
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

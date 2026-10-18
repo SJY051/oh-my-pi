@@ -9,7 +9,7 @@
  *   ]);
  * }
  */
-import type { TspKind, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { TspElTag, TspKind, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "./node";
 
 /** A node of any kind. */
@@ -74,6 +74,22 @@ export function keyed(described: NativeNode, key: string): NativeNode {
 export function withHidden(described: NativeNode, hidden: boolean): NativeNode {
 	if (!hidden) return described;
 	return node(described.k, { ...described.p, hidden: true } as TspProps, described.c, described.key);
+}
+
+/**
+ * One HTML element (`el`). `sheet` is CSS confined to the element's subtree:
+ * selectors are relative to it and the terminal never sees a rule that could
+ * reach beyond it (see {@link NativeNode.sheet}).
+ */
+export function el(
+	tag: TspElTag,
+	p?: Omit<TspProps<"el">, "tag">,
+	c?: readonly NativeChild[],
+	key?: string,
+	sheet?: string,
+): NativeNode {
+	const described = node("el", { ...p, tag }, c, key);
+	return sheet === undefined ? described : { ...described, sheet };
 }
 
 /** Stable node key for an arbitrary identity string; keys join into `/` keypaths, so identities are hashed. */

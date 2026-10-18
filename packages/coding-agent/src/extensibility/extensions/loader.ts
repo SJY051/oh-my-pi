@@ -169,6 +169,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	setSessionName(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
+
+	/** No transcript to refresh until a mode that has one initializes the runtime. */
+	redescribeToolCards(): void {}
 }
 
 /**
@@ -306,6 +309,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	appendEntry(customType: string, data?: unknown): void {
 		this.runtime.appendEntry(customType, data);
+	}
+
+	redescribeToolCards(toolName: string, toolCallId?: string): void {
+		// Another extension's cards are not this one's to refresh.
+		if (!this.extension.tools.has(toolName)) return;
+		this.runtime.redescribeToolCards(toolName, toolCallId);
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {

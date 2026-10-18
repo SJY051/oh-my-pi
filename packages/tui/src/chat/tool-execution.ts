@@ -16,6 +16,8 @@ import {
 	type NativeToolView,
 	type RenderResultContextOptions,
 	type ToolActivitySummary,
+	type ToolNativeEvent,
+	type ToolNativeEventBase,
 	type ToolRenderer,
 	toolRenderers,
 } from "../tools/index";
@@ -31,6 +33,16 @@ import {
 } from "../native/node";
 import { plainText } from "../native/spans";
 import { diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
+import {
+	containsEl,
+	EL_MAX_SHEET_BYTES,
+	elActionName,
+	elFallbackText,
+	replaceElWithText,
+	sanitizeElChildren,
+	scopedView,
+} from "../native/el";
+import { describedKeypaths } from "../native/reconcile";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
 import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
@@ -125,6 +137,25 @@ function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined
 
 /** The describe hooks of a registry renderer or of a custom tool object. */
 type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
+
+/** The interactive-view hook of a tool object (an extension tool's `onNativeEvent`). */
+interface NativeEventTool {
+	onNativeEvent?(event: ToolNativeEvent): void | Promise<void>;
+}
+
+/**
+ * The key prefix of a view's body inside its stylesheet wrappers (`scopedView`):
+ * event keys are relative to the body, so it is dropped from them again.
+ */
+const VIEW_SCOPE_KEY = /^view-(?:call|result)\/root\/(.+)$/;
+
+/**
+ * Every card alive in the transcript, weakly held: a transcript rebuild that
+ * drops a card without disposing it must not keep it (and its result) alive.
+ * {@link ToolExecutionComponent.redescribe} finds the cards it addresses here.
+ */
+const liveCards = new Set<WeakRef<ToolExecutionComponent>>();
+const collectedCards = new FinalizationRegistry<WeakRef<ToolExecutionComponent>>(ref => liveCards.delete(ref));
 
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
@@ -456,6 +487,16 @@ export class ToolExecutionComponent extends Container {
 	#executionEndedAtNow: number | undefined;
 	readonly #toolCallId: string | undefined;
 	readonly #native = new Memo();
+	/** The `el` fallback text a terminal with no `el` shows, per result and display input. */
+	readonly #elFallback = new Memo<string | undefined>();
+	/** The last description held `el` nodes. */
+	#sawEl = false;
+	/** Keypaths of the `el` nodes the last description holds: the only nodes an event may name. */
+	#liveKeys: ReadonlySet<string> = new Set();
+	/** Disposed (a transcript rebuild or session switch dropped the card): its nodes no longer exist. */
+	#disposed = false;
+	/** This card's entry in {@link liveCards}. */
+	readonly #cardRef = new WeakRef(this);
 	// LSP diagnostics that arrived after the result (native only), shown in the frame.
 	#lateDiagnostics: readonly FileDiagnosticsResult[] | undefined;
 	readonly #nativeImages = new NativeImageCache();
@@ -523,6 +564,8 @@ export class ToolExecutionComponent extends Container {
 		// so keep their horizontal padding even when the user enables tight layout.
 		this.setIgnoreTight(true);
 
+		liveCards.add(this.#cardRef);
+		collectedCards.register(this, this.#cardRef);
 		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
 	}
@@ -902,6 +945,8 @@ export class ToolExecutionComponent extends Container {
 	 * interval alive and keep being repainted.
 	 */
 	override dispose(): void {
+		this.#disposed = true;
+		liveCards.delete(this.#cardRef);
 		this.stopAnimation();
 		super.dispose();
 	}
@@ -930,6 +975,123 @@ export class ToolExecutionComponent extends Container {
 	handleNativeEvent(event: NativeUiEvent): void {
 		const expanded = rootToggleExpanded(event);
 		if (expanded !== undefined) this.setExpanded(expanded);
+		if (event.type === "action" || event.type === "control") this.#deliverToolEvent(event);
+	}
+
+	/**
+	 * Hand a click or control flip inside the tool's own view to its
+	 * `onNativeEvent` hook, then describe the card again: the hook may have
+	 * changed what the view reads (a promise settling counts too). The terminal
+	 * routes an event to the component that described the node, so only this
+	 * call's card ever sees it. An event for a node the current description no
+	 * longer holds (a control a later description dropped), or for a card that
+	 * was disposed (a transcript rebuild), is dropped: it names a button the user
+	 * can no longer see.
+	 */
+	#deliverToolEvent(event: Extract<NativeUiEvent, { type: "action" | "control" }>): void {
+		// Only the view's own `el` nodes: the card's chrome (head actions, the fold) is not the view's.
+		if (!this.#liveKeys.has(event.key)) return;
+		const key = VIEW_SCOPE_KEY.exec(event.key)?.[1] ?? event.key;
+		this.#dispatchToolEvent(base =>
+			event.type === "action"
+				? {
+						...base,
+						type: "action",
+						key,
+						values: event.values,
+						act: elActionName(event.act),
+						value: event.value,
+						mods: event.mods,
+					}
+				: {
+						...base,
+						type: "change",
+						key,
+						values: event.values,
+						name: event.name,
+						value: event.value,
+						checked: event.checked,
+					},
+		);
+	}
+
+	/**
+	 * Call the tool's `onNativeEvent` with the event `make` builds on the call's
+	 * identity, arguments and result, then describe the card again (`redescribe`
+	 * false: not for an event that changes nothing the view reads). Nothing happens
+	 * for a card whose tool has no hook, or that was disposed.
+	 */
+	#dispatchToolEvent(make: (base: ToolNativeEventBase) => ToolNativeEvent, redescribe = true): void {
+		const tool = this.#tool as NativeEventTool | undefined;
+		const toolCallId = this.#toolCallId;
+		if (!tool?.onNativeEvent || toolCallId === undefined || this.#disposed) return;
+		const toolEvent = make({
+			toolCallId,
+			key: "",
+			args: this.#args,
+			result: this.#result && {
+				content: this.#result.content,
+				details: this.#result.details,
+				isError: this.#result.isError,
+			},
+		});
+		const failed = (error: unknown): void => {
+			logger.warn("Tool native event handler failed", { tool: this.#toolName, error: String(error) });
+		};
+		let pending: void | Promise<void>;
+		try {
+			pending = tool.onNativeEvent(toolEvent);
+		} catch (error) {
+			failed(error);
+			return;
+		}
+		if (pending) {
+			pending.then(
+				() => {
+					if (redescribe) this.#redescribeNow();
+				},
+				error => {
+					failed(error);
+					if (redescribe) this.#redescribeNow();
+				},
+			);
+		} else if (redescribe) {
+			this.#redescribeNow();
+		}
+	}
+
+	/**
+	 * Describe this card again at the next frame: its view may read differently
+	 * from the last time. Only versions change here; the description itself is
+	 * made when the surface next renders.
+	 */
+	#redescribeNow(): void {
+		if (this.#disposed) return;
+		this.#blockVersion++;
+		this.#displayInputVersion++;
+		this.invalidate();
+		this.#ui.requestRender();
+	}
+
+	/**
+	 * Ask the cards of `ui` that show a call of `toolName` (only `toolCallId`'s
+	 * when given) to describe themselves again, for an extension whose tool's
+	 * view changed outside an `onNativeEvent` (a background job finished). A
+	 * card that is gone, or a name or id no card shows, is skipped.
+	 */
+	static redescribe(ui: ToolExecutionUi, toolName: string, toolCallId?: string): void {
+		for (const ref of liveCards) {
+			const card = ref.deref();
+			if (card === undefined) {
+				liveCards.delete(ref);
+			} else if (
+				card.#ui === ui &&
+				card.#toolName === toolName &&
+				(toolCallId === undefined || card.#toolCallId === toolCallId)
+			) {
+				card.#redescribeNow();
+			}
+		}
 	}
 
 	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
@@ -984,6 +1146,7 @@ export class ToolExecutionComponent extends Container {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
 		const dataFirst = cx?.supports("tool") === true;
 		const media = cx?.supports("media") === true;
+		const elSupported = cx?.supports("el") === true;
 		const key = [
 			dataFirst,
 			this.#resultVersion,
@@ -997,11 +1160,18 @@ export class ToolExecutionComponent extends Container {
 			this.#displayInputVersion,
 			this.#toolActivityVisible,
 			media,
+			elSupported,
 			getThemeEpoch(),
 		];
-		return this.#native.get(key, () =>
-			withHidden(dataFirst ? this.#describeTool(media) : this.#describeCard(media), !this.#toolActivityVisible),
-		);
+		return this.#native.get(key, () => {
+			const described = withHidden(
+				dataFirst ? this.#describeTool(media, elSupported) : this.#describeCard(media, elSupported),
+				!this.#toolActivityVisible,
+			);
+			const hasView = this.#sawEl && elSupported;
+			this.#liveKeys = hasView ? describedKeypaths(described, n => n.k === "el") : new Set();
+			return described;
+		});
 	}
 
 	/** Milliseconds since execution started (running) or its total (settled); undefined before it starts. */
@@ -1046,8 +1216,8 @@ export class ToolExecutionComponent extends Container {
 	 * The data-first `tool` node (§7.2): the renderer's head data, status,
 	 * timer, exit and intent as props; its body as borderless children.
 	 */
-	#describeTool(media: boolean): NativeNode {
-		const view = this.#nativeView(media);
+	#describeTool(media: boolean, elSupported: boolean): NativeNode {
+		const view = this.#nativeView(media, elSupported);
 		const status = this.#nativeStatus();
 		const head = view.tool;
 		const late = this.#lateDiagnosticsParts();
@@ -1116,8 +1286,8 @@ export class ToolExecutionComponent extends Container {
 		return spans;
 	}
 
-	#describeCard(media: boolean): NativeNode {
-		const view = this.#nativeView(media);
+	#describeCard(media: boolean, elSupported: boolean): NativeNode {
+		const view = this.#nativeView(media, elSupported);
 		const status = this.#nativeStatus();
 		const late = this.#lateDiagnosticsParts();
 		const fallbackHead = this.#fallbackHead(view);
@@ -1167,14 +1337,42 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * One side of the renderer's view with its `el` nodes made safe to send:
+	 * validated (a tool is untrusted input), inside the wrappers its stylesheet
+	 * needs, or — where the terminal draws no `el` — replaced by its fallback text.
+	 * Each side has its own stylesheet; the two never share a scope.
+	 */
+	#prepareView(view: NativeToolView, side: "call" | "result", elSupported: boolean): NativeToolView {
+		if (!containsEl(view.body)) return view;
+		this.#sawEl = true;
+		const body = sanitizeElChildren(view.body ?? [], this.#toolName);
+		if (!elSupported) {
+			return {
+				...view,
+				body: view.fallback === undefined ? replaceElWithText(body) : [text(view.fallback)],
+				sheet: undefined,
+			};
+		}
+		let sheet = view.sheet;
+		if (sheet !== undefined && Buffer.byteLength(sheet) > EL_MAX_SHEET_BYTES) {
+			logger.warn("Tool stylesheet dropped", { tool: this.#toolName, limit: EL_MAX_SHEET_BYTES });
+			sheet = undefined;
+		}
+		if (sheet === undefined) return { ...view, body, sheet: undefined };
+		return { ...view, body: [scopedView(body, sheet, `view-${side}`)], sheet: undefined };
+	}
+
+	/**
 	 * The renderer's semantic view: the call view until a result exists, then
 	 * the result view (merged renderers) or the call head over both bodies.
 	 * A renderer that throws falls back to the generic card.
 	 */
-	#nativeView(media: boolean): NativeToolView {
+	#nativeView(media: boolean, elSupported: boolean): NativeToolView {
+		this.#sawEl = false;
 		const status = this.#nativeStatus();
 		const options: RenderResultContextOptions = {
 			media,
+			toolCallId: this.#toolCallId,
 			expanded: this.#expanded,
 			isPartial: this.#isPartial,
 			argsComplete: this.#argsComplete,
@@ -1195,14 +1393,16 @@ export class ToolExecutionComponent extends Container {
 			const args = this.#getCallArgsForRender();
 			const result = this.#result;
 			const merged = renderer.mergeCallAndResult === true;
-			const resultView = result
+			const rawResult = result
 				? renderer.describeResult?.(
 						{ content: result.content, details: result.details, isError: result.isError },
 						options,
 						args,
 					)
 				: undefined;
-			const callView = !result || !merged || !resultView ? renderer.describeCall?.(args, options) : undefined;
+			const resultView = rawResult && this.#prepareView(rawResult, "result", elSupported);
+			const rawCall = !result || !merged || !resultView ? renderer.describeCall?.(args, options) : undefined;
+			const callView = rawCall && this.#prepareView(rawCall, "call", elSupported);
 			if (merged || !callView || !resultView) {
 				return resultView ?? callView ?? { head: [span(this.#toolLabel, "toolTitle")] };
 			}
@@ -1931,13 +2131,33 @@ export class ToolExecutionComponent extends Container {
 				label: this.#toolLabel,
 				args: this.#args,
 				result: this.#result
-					? { output: this.#getTextOutput(), isError: this.#result.isError, skipped: this.#isBenignSkip() }
+					? {
+							output: this.#elFallbackOutput() ?? this.#getTextOutput(),
+							isError: this.#result.isError,
+							skipped: this.#isBenignSkip(),
+						}
 					: undefined,
 				options: this.#renderState,
 			},
 			contentWidth,
 			theme,
 		);
+	}
+
+	/**
+	 * What a terminal that draws no `el` shows for a tool whose result view is
+	 * made of `el` nodes: the view's `fallback`, else the nodes read as text.
+	 * Undefined for every other tool, whose own output text stands.
+	 */
+	#elFallbackOutput(): string | undefined {
+		const tool = this.#tool as ToolDescriber | undefined;
+		if (!this.#result || this.#isBenignSkip() || !tool?.describeResult) return undefined;
+		return this.#elFallback.get([this.#resultVersion, this.#displayInputVersion, this.#isPartial], () => {
+			const view = this.#nativeView(false, false);
+			if (!this.#sawEl) return undefined;
+			const plain = elFallbackText(view.body ?? []);
+			return plain === "" ? undefined : plain;
+		});
 	}
 
 	/**

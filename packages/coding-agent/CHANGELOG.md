@@ -10,6 +10,9 @@
 - Added `el.type(text)` and `el.press(chord)` to the `computer` tool, which send text and keys to that element instead of wherever its window's focus is; on macOS and Windows nothing is sent when the element cannot be addressed without taking your focus ([#15563](https://github.com/can1357/oh-my-pi/pull/15563) by [@will-bogusz](https://github.com/will-bogusz))
 - Added: pressing Escape during takeover input now stops computer use for the rest of the turn, and that session's later `computer` calls are refused, unsent, until your next message ([#15564](https://github.com/can1357/oh-my-pi/pull/15564) by [@will-bogusz](https://github.com/will-bogusz))
 - Added the `computer` tool's `UserIntervened` error on macOS: input into an app you have used since the agent last read its window fails without sending, and the agent is told to read the window again and keep your edits ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `ToolDefinition.onNativeEvent(event, ctx)` so an extension tool's interactive card (`el` elements in `describeResult`, with a `sheet` stylesheet and a `fallback` text) can start a turn or update itself when the user clicks it in Tern; see `docs/extensions.md`
+- Added `pi.redescribeToolCards(toolName, toolCallId?)` so an extension can have OMP describe its tool cards again from outside `onNativeEvent` (a timer, a finished background job); it is ignored for tools the extension does not own, unknown cards and modes without a transcript; see `docs/extensions.md`
+- An `el` action named `toggle`, `copy`, `open` or `zoom` is no longer swallowed by Tern: OMP sends it under another name and gives `onNativeEvent` the name the view wrote; `open`/`copy` on an element with an `href` stay Tern's own
 
 ### Changed
 

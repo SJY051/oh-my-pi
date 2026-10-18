@@ -205,8 +205,6 @@ const EVENT_REQUIRED: Readonly<Record<string, Readonly<Record<string, "string" |
 	select: { id: "string", item: "string" },
 	activate: { id: "string", item: "string" },
 	action: { id: "string", act: "string" },
-	// `value` varies by control (boolean, number, string, string[], null): the handler checks it.
-	change: { id: "string", item: "string" },
 	edit: { id: "string", from: "number", to: "number", text: "string", cursor: "number", len: "number" },
 	undo: { id: "string" },
 	focus: { id: "string" },
@@ -220,6 +218,14 @@ function decodeEvent(value: Record<string, unknown>): TspEvent | null {
 		const { sf, id, text } = value;
 		if (typeof sf !== "string" || !sf || typeof id !== "string" || !id || typeof text !== "string") return null;
 		return { ev: "send", sf, id, text };
+	}
+	if (value.ev === "change") {
+		if (typeof value.id !== "string") return null;
+		// A prefs row or picker toggle names an `item` and carries a typed `value` the handler checks;
+		// an `el` checkbox or radio has no `item`, a string `value` and its `checked` state.
+		if (typeof value.item === "string") return value as TspEvent;
+		if (typeof value.value !== "string" || typeof value.checked !== "boolean") return null;
+		return value as TspEvent;
 	}
 	const required = EVENT_REQUIRED[value.ev];
 	if (!required) return null;

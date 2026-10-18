@@ -28,9 +28,17 @@
  * into `layer`; their anchor keypaths are rewritten to wire ids.
  */
 import * as logger from "@oh-my-pi/pi-utils/logger";
-import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
+import {
+	TSP_MAX_SURFACE_CSS_BYTES,
+	TSP_TEXT_KINDS,
+	type TspKind,
+	type TspNode,
+	type TspOp,
+	type TspScrollBy,
+} from "@oh-my-pi/pi-wire";
 import { type Component, Container, CURSOR_MARKER } from "../tui";
 import { getNativeBlob } from "./blobs";
+import { elFallbackText, styleScopeName, viewSheetCss } from "./el";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
 import { isNativeSettled } from "./settle";
@@ -47,6 +55,32 @@ export interface NativeTarget {
 	readonly component: Component;
 	/** Keypath inside the component ("" for its root node). */
 	readonly keypath: string;
+}
+
+/** One `s` message's content: stylesheet `name`, or its removal when `css` is null. */
+export interface StyleChange {
+	readonly name: string;
+	readonly css: string | null;
+}
+
+/** The stylesheet messages a reconcile asks for: installs go out before its frame, removals after (before it when `removeFirst`). */
+export interface StyleChanges {
+	readonly install: StyleChange[];
+	readonly remove: StyleChange[];
+	removeFirst: boolean;
+}
+
+/** A program stylesheet shared by every node whose `sheet` text is the same. */
+interface SheetState {
+	/** The confined CSS the terminal receives. */
+	readonly css: string;
+	readonly bytes: number;
+	/** Wire ids of the nodes using it. */
+	readonly ids: Set<string>;
+	/** The terminal holds it. */
+	sent: boolean;
+	/** Left out for want of room (reported once). */
+	rejected: boolean;
 }
 
 const kNativeId = Symbol("native.id");
@@ -94,6 +128,69 @@ function unescapeKey(segment: string): string {
 
 function nodeId(base: string, keypath: string): string {
 	return keypath === "" ? base : `${base}.${keypath}`;
+}
+
+/**
+ * The keypath of each child slot of a node whose own keypath is `keypath`:
+ * its escaped key (else its index), made unique among its siblings. Components
+ * get a path too, which only describe-time nodes use.
+ */
+function childPaths(children: readonly NativeChild[], keypath: string): string[] {
+	const out: string[] = [];
+	const used = new Set<string>();
+	for (let i = 0; i < children.length; i++) {
+		const child = children[i]!;
+		const segment = isComponent(child) || child.key === undefined ? String(i) : escapeKey(child.key);
+		let path = keypath === "" ? segment : `${keypath}/${segment}`;
+		if (children.length > 1) {
+			// A key may repeat, or equal an unkeyed sibling's index.
+			if (used.has(path)) {
+				let n = 2;
+				while (used.has(`${path}~${n}`)) n++;
+				path = `${path}~${n}`;
+			}
+			used.add(path);
+		}
+		out.push(path);
+	}
+	return out;
+}
+
+/**
+ * Every keypath inside a component's described `root` (the form {@link NativeTarget.keypath}
+ * reports for an event), so a component can tell a live node from one a later
+ * description no longer holds.
+ */
+export function describedKeypaths(root: NativeNode, include: (node: NativeNode) => boolean = () => true): Set<string> {
+	const out = new Set<string>();
+	const visit = (children: readonly NativeChild[] | undefined, keypath: string): void => {
+		if (!children) return;
+		const paths = childPaths(children, keypath);
+		children.forEach((child, i) => {
+			if (isComponent(child)) return;
+			const path = paths[i]!;
+			if (include(child)) out.add(path.split("/").map(unescapeKey).join("/"));
+			visit(child.c, path);
+		});
+	};
+	if (include(root)) out.add("");
+	visit(root.c, "");
+	return out;
+}
+
+/** Stand-ins for `el` nodes in a terminal that draws none, so the same node object stays the same node object. */
+const elStandIns = new WeakMap<NativeNode, NativeNode>();
+
+/** Wire kinds without a stylesheet can't carry a sheet either: an `el` the terminal can't draw becomes its text. */
+function elStandIn(node: NativeNode): NativeNode {
+	let stand = elStandIns.get(node);
+	if (!stand) {
+		const text = elFallbackText([node]);
+		stand =
+			text === "" ? { k: "col", p: { hidden: true }, key: node.key } : { k: "text", p: { text }, key: node.key };
+		elStandIns.set(node, stand);
+	}
+	return stand;
 }
 
 function sameValue(a: unknown, b: unknown): boolean {
@@ -240,6 +337,15 @@ export class Reconciler {
 		dock: { base: "dock", state: null },
 		layer: { base: "layer", state: null },
 	};
+	/** Installed or wanted stylesheets by name (the scope class its nodes wear). */
+	#sheets = new Map<string, SheetState>();
+	/** The sheet name each node with a `sheet` uses, by wire id. */
+	#sheetOf = new Map<string, string>();
+	/** The ids in `#sheetOf` each component (by base id) owns, so dropping a component releases them. */
+	#sheetIdsOf = new Map<string, Set<string>>();
+	/** CSS bytes the terminal holds for this surface. */
+	#styleBytes = 0;
+	#styles: StyleChanges = { install: [], remove: [], removeFirst: false };
 
 	constructor(surface: string) {
 		this.surface = surface;
@@ -248,6 +354,11 @@ export class Reconciler {
 	/** `rows` fallback nodes in the last reconciled frame. */
 	get fallbackCount(): number {
 		return this.#rows;
+	}
+
+	/** The stylesheet messages the last {@link reconcile} asks for. */
+	get styles(): StyleChanges {
+		return this.#styles;
 	}
 
 	/** Diff the regions against the previous frame; the first call adds everything. */
@@ -260,6 +371,7 @@ export class Reconciler {
 		this.#reveals = [];
 		this.#scrolls = [];
 		this.#selectedIds.clear();
+		this.#styles = { install: [], remove: [], removeFirst: false };
 		this.#framePortals = [];
 		this.#rows = 0;
 		let prev = this.#regions;
@@ -304,6 +416,7 @@ export class Reconciler {
 		for (const id of this.#settles) this.#ops.push(["settle", id]);
 		for (const [id, at] of this.#reveals) this.#ops.push(["reveal", id, at]);
 		if (cx.feature("scroll")) for (const [id, by] of this.#scrolls) this.#ops.push(["scroll", id, by]);
+		this.#flushStyles();
 		const ops = this.#ops;
 		this.#ops = [];
 		return this.#gone.size === 0 ? ops : ops.filter(op => !this.#touchesGone(op));
@@ -455,25 +568,14 @@ export class Reconciler {
 	): readonly Entry[] {
 		if (!children || children.length === 0) return EMPTY_ENTRIES;
 		const out: Entry[] = [];
-		let used: Set<string> | undefined;
+		const paths = childPaths(children, keypath);
 		for (let i = 0; i < children.length; i++) {
-			const child = children[i]!;
+			const child = this.#gate(children[i]!);
 			if (isComponent(child)) {
 				out.push({ id: nativeComponentId(child), comp: child });
 				continue;
 			}
-			const segment = child.key === undefined ? String(i) : escapeKey(child.key);
-			let path = keypath === "" ? segment : `${keypath}/${segment}`;
-			if (children.length > 1) {
-				// A key may repeat, or equal an unkeyed sibling's index.
-				used ??= new Set();
-				if (used.has(path)) {
-					let n = 2;
-					while (used.has(`${path}~${n}`)) n++;
-					path = `${path}~${n}`;
-				}
-				used.add(path);
-			}
+			const path = paths[i]!;
 			const entry: NodeEntry = {
 				id: nodeId(owner.base, path),
 				node: child,
@@ -630,6 +732,7 @@ export class Reconciler {
 			this.#flushMoves();
 			return;
 		}
+		if (next.node.k === "el") this.#syncSheet(next.id, next.owner.base, next.node.sheet);
 		const scroll = next.node.scroll;
 		if (scroll && scroll.n !== old.node.scroll?.n) {
 			// Presses described in one frame coalesce: repeat the latest step once per
@@ -770,6 +873,13 @@ export class Reconciler {
 					return { ...props, anchor: { ...anchor, node: nodeId(owner.base, anchor.node) } };
 				return props;
 			}
+			case "el": {
+				const scope =
+					node.sheet !== undefined && this.#cx!.feature("styles") ? styleScopeName(node.sheet) : undefined;
+				if (scope === undefined) return props;
+				const own = props?.class;
+				return { ...props, class: typeof own === "string" && own !== "" ? `${own} ${scope}` : scope };
+			}
 			default:
 				return props;
 		}
@@ -777,6 +887,7 @@ export class Reconciler {
 
 	/** A full wire subtree for an entry; nested components get states (or pending moves when mounted elsewhere). */
 	#materialize(entry: NodeEntry, walk: Walk): TspNode {
+		if (entry.node.k === "el") this.#syncSheet(entry.id, entry.owner.base, entry.node.sheet);
 		if (typeof entry.node.reveal === "string") this.#reveals.push([entry.id, entry.node.reveal]);
 		const entries = this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, walk);
 		const children: TspNode[] = [];
@@ -934,7 +1045,7 @@ export class Reconciler {
 		const inherited = describe === Container.prototype.describe && comp.render !== Container.prototype.render;
 		if (describe && !inherited) {
 			const node = describe.call(comp, this.#cx!);
-			if (node) return node;
+			if (node) return this.#gate(node) as NativeNode;
 		}
 		this.#rows++;
 		const cols = Math.max(1, this.#cx!.cols);
@@ -1009,6 +1120,8 @@ export class Reconciler {
 	/** A settled component changed: targeted ops by id, no diff against dropped state. */
 	#replaceSettled(state: CompState, next: NativeNode, parent: string, before: string | null, settled: boolean): void {
 		state.settleSent = false;
+		this.#releaseBase(state.id);
+		if (next.k === "el") this.#syncSheet(state.id, state.id, next.sheet);
 		const inner: Inner[] = [];
 		const walk: Walk = { owner: state.owner, inner, settled, hoist: true };
 		if (next.k !== state.kind) {
@@ -1086,6 +1199,7 @@ export class Reconciler {
 	 * delete doesn't take it along.
 	 */
 	#dropSubtree(entry: NodeEntry): void {
+		this.#releaseSheet(entry.id, entry.owner.base);
 		for (const child of this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, null)) {
 			if (child.comp === undefined) this.#dropSubtree(child);
 			else {
@@ -1117,9 +1231,104 @@ export class Reconciler {
 	}
 
 	#dropState(state: CompState): void {
+		this.#releaseBase(state.id);
 		state.parked = false;
 		this.#states.delete(state.comp);
 		this.#byId.delete(state.id);
 		this.#dropNested(state);
+	}
+
+	// ── Stylesheets ──────────────────────────────────────────────────────
+
+	/**
+	 * Point node `id` at the sheet for `css` (undefined: none, or the terminal
+	 * has no `styles`). The sheet is named by its text, so identical sheets
+	 * (the same tool drawn twice) are one sheet with several users.
+	 */
+	#syncSheet(id: string, base: string, css: string | undefined): void {
+		const name = css !== undefined && this.#cx!.feature("styles") ? styleScopeName(css) : undefined;
+		const prev = this.#sheetOf.get(id);
+		if (prev === name) return;
+		this.#releaseSheet(id, base);
+		if (name === undefined || css === undefined) return;
+		let sheet = this.#sheets.get(name);
+		if (!sheet) {
+			const scoped = viewSheetCss(css, name);
+			sheet = { css: scoped, bytes: Buffer.byteLength(scoped), ids: new Set(), sent: false, rejected: false };
+			this.#sheets.set(name, sheet);
+		}
+		sheet.ids.add(id);
+		this.#sheetOf.set(id, name);
+		let owned = this.#sheetIdsOf.get(base);
+		if (!owned) this.#sheetIdsOf.set(base, (owned = new Set()));
+		owned.add(id);
+	}
+
+	#releaseSheet(id: string, base: string): void {
+		const name = this.#sheetOf.get(id);
+		if (name === undefined) return;
+		this.#sheetOf.delete(id);
+		this.#sheets.get(name)?.ids.delete(id);
+		this.#sheetIdsOf.get(base)?.delete(id);
+	}
+
+	/** Release every sheet the component with base id `base` uses (it is being dropped or rebuilt). */
+	#releaseBase(base: string): void {
+		const owned = this.#sheetIdsOf.get(base);
+		if (!owned) return;
+		for (const id of owned) this.#releaseSheet(id, base);
+		this.#sheetIdsOf.delete(base);
+	}
+
+	/**
+	 * Turn the frame's sheet use into installs (new sheets) and removals (sheets no
+	 * node uses any more). Installs normally go out before the frame and removals
+	 * after it, so the terminal briefly holds both; when the installs would not
+	 * fit beside what it holds, the removals go first ({@link StyleChanges.removeFirst})
+	 * and the budget is what is left.
+	 */
+	#flushStyles(): void {
+		const removals: [name: string, sheet: SheetState][] = [];
+		let wanted = 0;
+		for (const [name, sheet] of this.#sheets) {
+			if (sheet.ids.size > 0) {
+				if (!sheet.sent) wanted += sheet.bytes;
+			} else if (sheet.sent) removals.push([name, sheet]);
+			else this.#sheets.delete(name);
+		}
+		const removed = removals.reduce((sum, [, sheet]) => sum + sheet.bytes, 0);
+		const removeFirst = removed > 0 && this.#styleBytes + wanted > TSP_MAX_SURFACE_CSS_BYTES;
+		this.#styles.removeFirst = removeFirst;
+		let resident = removeFirst ? this.#styleBytes - removed : this.#styleBytes;
+		let installed = 0;
+		for (const [name, sheet] of this.#sheets) {
+			if (sheet.ids.size === 0 || sheet.sent) continue;
+			if (resident + sheet.bytes > TSP_MAX_SURFACE_CSS_BYTES) {
+				if (!sheet.rejected) {
+					sheet.rejected = true;
+					logger.warn("TSP: stylesheet left out, the surface's CSS budget is full", {
+						sf: this.surface,
+						bytes: sheet.bytes,
+						held: resident,
+					});
+				}
+				continue;
+			}
+			sheet.sent = true;
+			sheet.rejected = false;
+			resident += sheet.bytes;
+			installed += sheet.bytes;
+			this.#styles.install.push({ name, css: sheet.css });
+		}
+		for (const [name] of removals) {
+			this.#styles.remove.push({ name, css: null });
+			this.#sheets.delete(name);
+		}
+		this.#styleBytes += installed - removed;
+	}
+
+	/** The description as the terminal can draw it: an `el` it lists no kind for (or doesn't yet, before its hello) is replaced by its text. */
+	#gate(child: NativeChild): NativeChild {
+		return !isComponent(child) && child.k === "el" && this.#cx!.supports("el") !== true ? elStandIn(child) : child;
 	}
 }
