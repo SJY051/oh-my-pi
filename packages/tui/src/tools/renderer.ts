@@ -199,7 +199,33 @@ export interface ToolNativeChangeEvent extends ToolNativeEventBase {
 	readonly checked: boolean;
 }
 
-export type ToolNativeEvent = ToolNativeActionEvent | ToolNativeChangeEvent;
+/**
+ * The user changed the text of a field of the view (`inputField`/`editorField`):
+ * typing, a paste, or an edit of the terminal's own selection. `key` is the field's.
+ */
+export interface ToolNativeEditEvent extends ToolNativeEventBase {
+	readonly type: "edit";
+	/** The whole text after the edit. */
+	readonly value: string;
+	/** The caret as a UTF-16 offset into {@link value}. */
+	readonly cursor: number;
+}
+
+/**
+ * The terminal's pane was hidden (another tab) or shown again. The terminal
+ * reports it for the pane, not for a card: a card scrolled out of sight stays
+ * "visible". Sent on change only (a card starts out visible); `key` is `""`.
+ */
+export interface ToolNativeVisibleEvent extends ToolNativeEventBase {
+	readonly type: "visible";
+	readonly visible: boolean;
+}
+
+export type ToolNativeEvent =
+	| ToolNativeActionEvent
+	| ToolNativeChangeEvent
+	| ToolNativeEditEvent
+	| ToolNativeVisibleEvent;
 
 /**
  * A tool's transcript presentation: call preview, result view, and repaint/animation hints.

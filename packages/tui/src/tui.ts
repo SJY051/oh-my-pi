@@ -903,6 +903,10 @@ export class TUI extends Container {
 	#previousWidth = 0;
 	#previousHeight = 0;
 	#focusedComponent: Component | null = null;
+	/** Where the keys return to when a component the user clicked into releases them, by that component. */
+	#returnFocus = new WeakMap<Component, Component>();
+	#terminalVisible = true;
+	#visibilityListeners = new Set<(visible: boolean) => void>();
 	#debugServer: TuiDebugServer | undefined;
 	#debugPaint:
 		| {
@@ -1471,7 +1475,42 @@ export class TUI extends Container {
 		}
 		if (!field || field === this.#focusedComponent || !visible.every(entry => sheet(entry.component))) return;
 		for (const entry of visible) entry.released = true;
+		// Where the keys go back to when `field` lets go of them (see `releaseFocus`): the component that held them
+		// before, or the one that field's predecessor itself would have returned them to.
+		const previous = this.#focusedComponent;
+		if (previous !== null) {
+			const back = this.#returnFocus.get(previous) ?? previous;
+			if (back === field) this.#returnFocus.delete(field);
+			else this.#returnFocus.set(field, back);
+		}
 		this.setFocus(field);
+	}
+
+	/**
+	 * A field the user clicked into (the terminal's `focus` event) lets go of the
+	 * keys: they go back to the component that held them before the click, the
+	 * composer for a field inside a transcript card. Does nothing when `component`
+	 * has not got the focus or nothing is remembered for it.
+	 */
+	releaseFocus(component: Component): void {
+		const back = this.#returnFocus.get(component);
+		this.#returnFocus.delete(component);
+		if (back === undefined || this.#focusedComponent !== component) return;
+		this.setFocus(back);
+		this.requestRender();
+	}
+
+	/** Whether the terminal's pane is showing (the TSP `visible` event; true until it says otherwise). */
+	get terminalVisible(): boolean {
+		return this.#terminalVisible;
+	}
+
+	/** Observe the pane being hidden (another tab) or shown again, as the terminal reports it; returns the unsubscribe. */
+	addVisibilityListener(listener: (visible: boolean) => void): () => void {
+		this.#visibilityListeners.add(listener);
+		return () => {
+			this.#visibilityListeners.delete(listener);
+		};
 	}
 
 	override invalidate(): void {
@@ -1828,6 +1867,17 @@ export class TUI extends Container {
 			},
 			focused: () => this.#focusedComponent,
 			focusFromPointer: (owners, field, sheet) => this.#focusFromPointer(owners, field, sheet),
+			visibilityChanged: visible => {
+				if (visible === this.#terminalVisible) return;
+				this.#terminalVisible = visible;
+				for (const listener of this.#visibilityListeners) {
+					try {
+						listener(visible);
+					} catch (error) {
+						logger.warn("TUI visibility listener failed", { error: String(error) });
+					}
+				}
+			},
 			requestRender: () => this.requestRender(),
 			appearanceChanged: () => {
 				this.terminal.refreshAppearance?.();

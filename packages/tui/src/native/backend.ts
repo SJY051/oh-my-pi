@@ -86,6 +86,8 @@ export interface NativeHost {
 		field: Component | null,
 		sheet: (overlay: Component) => boolean,
 	): void;
+	/** The terminal's pane was hidden (another tab) or shown again: `visible` is the new state. */
+	visibilityChanged?(visible: boolean): void;
 	requestRender(): void;
 	/** The terminal switched appearance. */
 	appearanceChanged(dark: boolean): void;
@@ -129,6 +131,12 @@ const SESSION_ROLE = "omp.session";
 const BLOB_REPLY_MS = 3000;
 /** Expired queries kept to pair late replies with their queries, at most. */
 const MAX_BLOB_QUERIES = 16;
+/**
+ * Most blob ids the backend remembers the terminal holds. Past it the oldest
+ * are forgotten and, if shown again, asked about and sent again: a card that
+ * swaps in a new picture many times a second must not grow this table forever.
+ */
+const MAX_KNOWN_BLOBS = 512;
 
 /** A `blobs` query awaiting its reply; `timer` is unset once its ids no longer depend on it. */
 interface BlobQuery {
@@ -737,7 +745,7 @@ export class NativeBackend {
 				);
 				this.#record("out", "b", blobParams(blob), body);
 			}
-			this.#blobs.set(id, "sent");
+			this.#markSent(id);
 		}
 		if (!query?.timer) return;
 		query.timer.cancel();
@@ -753,8 +761,23 @@ export class NativeBackend {
 		}
 	}
 
+	/**
+	 * Remember the terminal holds blob `id`, newest last; past {@link MAX_KNOWN_BLOBS}
+	 * the oldest such memories go (blobs still waiting on a reply are never dropped).
+	 */
+	#markSent(id: string): void {
+		const blobs = this.#blobs;
+		blobs.delete(id);
+		blobs.set(id, "sent");
+		if (blobs.size <= MAX_KNOWN_BLOBS) return;
+		for (const [known, state] of blobs) {
+			if (blobs.size <= MAX_KNOWN_BLOBS) break;
+			if (state === "sent") blobs.delete(known);
+		}
+	}
+
 	#sendBlob(blob: NativeBlob): void {
-		this.#blobs.set(blob.id, "sent");
+		this.#markSent(blob.id);
 		const body = Buffer.from(blob.bytes.buffer, blob.bytes.byteOffset, blob.bytes.byteLength).toString("base64");
 		// The full body, so a replay (Tern's `surface-play`) shows the image.
 		this.#record("out", "b", blobParams(blob), body);
@@ -833,6 +856,7 @@ export class NativeBackend {
 				this.#host.motionChanged(event.reduce);
 				return;
 			case "visible":
+				this.#host.visibilityChanged?.(event.visible);
 				return;
 			case "error":
 				logger.warn("TSP: terminal reported an error", event);

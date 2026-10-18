@@ -684,6 +684,20 @@ describe("describing tool cards again on request", () => {
 		expect(other.renders()).toBe(0);
 		h.flush();
 	});
+
+	it("asks for one render per card however many requests arrive in a tick", async () => {
+		const { ui, renders } = countingUi();
+		const a = liveCard(ui, "call-a");
+		harness = await TspHarness.start(tui => tui.addChild(a), { features: FEATURES });
+		const before = renders();
+
+		ToolExecutionComponent.redescribe(ui, "card", "call-a");
+		ToolExecutionComponent.redescribe(ui, "card");
+		ToolExecutionComponent.redescribe(ui, "card", "call-a");
+		expect(renders()).toBe(before);
+		await Promise.resolve();
+		expect(renders()).toBe(before + 1);
+	});
 });
 
 describe("reserved action names in a tool view", () => {

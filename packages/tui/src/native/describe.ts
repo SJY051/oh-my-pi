@@ -9,7 +9,7 @@
  *   ]);
  * }
  */
-import type { TspElTag, TspKind, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
+import type { TspCommonProps, TspElTag, TspKind, TspProps, TspSpan, TspText } from "@oh-my-pi/pi-wire";
 import type { NativeChild, NativeNode } from "./node";
 
 /** A node of any kind. */
@@ -90,6 +90,61 @@ export function el(
 ): NativeNode {
 	const described = node("el", { ...p, tag }, c, key);
 	return sheet === undefined ? described : { ...described, sheet };
+}
+
+/** Layout props a tool view's text field or image may set. */
+type ToolLeafLayout = Pick<TspCommonProps, "tone" | "hidden" | "grow" | "shrink" | "basis" | "min" | "title">;
+
+/**
+ * Props of a text field in a tool view (see {@link inputField}). The text the
+ * user types lives in the card, not here: `value` seeds it and replaces it
+ * only when it changes between descriptions.
+ */
+export interface ToolFieldProps extends ToolLeafLayout, Pick<TspCommonProps, "max" | "aria"> {
+	/** The text; a value that differs from the one given last time replaces what the user typed (caret to the end). */
+	value?: string;
+	/** Dim hint while the text is empty. */
+	placeholder?: string;
+	/** Shown but not editable: a click does not take the keys. */
+	readonly?: boolean;
+	/** `input` only: keep the keys after Enter instead of handing them back to the composer. */
+	keepFocus?: boolean;
+	/** `editor` only: grow to this many lines, then scroll (at most 64). */
+	maxLines?: number;
+}
+
+/**
+ * A single-line text field of a tool view, for `onNativeEvent` to read (`edit`
+ * with the full text, Enter as the `submit` action). Needs a `key`: the key
+ * path names the field in events and holds its text between descriptions.
+ */
+export function inputField(p: ToolFieldProps, key: string): NativeNode {
+	return { k: "input", p, key } as NativeNode;
+}
+
+/** A multi-line text field (a textarea): Enter inserts a line break, nothing submits. See {@link inputField}. */
+export function editorField(p: ToolFieldProps, key: string): NativeNode {
+	return { k: "editor", p, key } as NativeNode;
+}
+
+/** Props of an image a tool view gives as bytes (see {@link imageBytes}). */
+export interface ToolImageProps extends ToolLeafLayout {
+	/** Accessible name; also what a terminal that can't draw the picture shows. */
+	alt?: string;
+	/** Pixel size, which lets the terminal reserve the space before the picture decodes. */
+	w?: number;
+	h?: number;
+	max?: TspProps<"image">["max"];
+}
+
+/**
+ * An image from bytes: PNG, JPEG, GIF, WebP, or SVG (`image/svg+xml`, at most
+ * 256 KiB). omp uploads it to the terminal once per content (equal bytes share
+ * one blob) and drops it when no card shows it. At most 2 MiB per image and
+ * 8 MiB per card; one over a cap is replaced by its `alt` text.
+ */
+export function imageBytes(bytes: Uint8Array, mime: string, p?: ToolImageProps, key?: string): NativeNode {
+	return { k: "image", p: { ...p, bytes, mime }, key } as NativeNode;
 }
 
 /** Stable node key for an arbitrary identity string; keys join into `/` keypaths, so identities are hashed. */

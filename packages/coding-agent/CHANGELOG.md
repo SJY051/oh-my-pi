@@ -13,6 +13,7 @@
 - Added `ToolDefinition.onNativeEvent(event, ctx)` so an extension tool's interactive card (`el` elements in `describeResult`, with a `sheet` stylesheet and a `fallback` text) can start a turn or update itself when the user clicks it in Tern; see `docs/extensions.md`
 - Added `pi.redescribeToolCards(toolName, toolCallId?)` so an extension can have OMP describe its tool cards again from outside `onNativeEvent` (a timer, a finished background job); it is ignored for tools the extension does not own, unknown cards and modes without a transcript; see `docs/extensions.md`
 - An `el` action named `toggle`, `copy`, `open` or `zoom` is no longer swallowed by Tern: OMP sends it under another name and gives `onNativeEvent` the name the view wrote; `open`/`copy` on an element with an `href` stay Tern's own
+- Added text fields (`inputField`, `editorField`), images from bytes (`imageBytes`) and pane visibility to interactive tool cards: `onNativeEvent` now also receives `edit` (the whole text), `submit` (an `action`; Enter in a single-line field) and `visible` events (`ToolNativeEditEvent`, `ToolNativeVisibleEvent`). See `docs/extensions.md`.
 
 ### Changed
 

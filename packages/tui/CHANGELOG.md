@@ -7,6 +7,14 @@
 - Added interactive tool cards on Tern: a tool's `describeResult` can return HTML-style `el` nodes (forms, radios, checkboxes, buttons) with a stylesheet confined and clipped to the card, and its extension hook `onNativeEvent` receives the clicks and control flips; terminals that draw no `el` show the view's `fallback` text, or the elements read as text
 - Added `ToolExecutionComponent.redescribe(ui, toolName, toolCallId?)`, a request that cards of a tool describe themselves again outside an `onNativeEvent`
 - `el` actions named `toggle`, `copy`, `open` or `zoom` are sent to Tern as `omp-reserved-<name>` (unless on an element with an `href` for `open`/`copy`) and delivered to `onNativeEvent` under the name the view wrote
+- Added text fields in tool views: `inputField`/`editorField` (`@oh-my-pi/pi-tui/native/describe`) are made real by the card (`CardField`, the composer's own editing): clicking one takes the keys from the composer, every change reaches the tool as an `edit` event with the whole text, Enter submits, and Enter, Esc, a click in the composer, a dropped field or a disposed card hand the keys back (`TUI.releaseFocus`).
+- Added images from bytes in tool views (`imageBytes`, or an `image` node with `bytes` and `mime`): uploaded once per content hash with TSP blobs, capped at 2 MiB per image, 256 KiB per SVG and 8 MiB per card, replaced by their `alt` text over a cap, and read as `alt` (fields as `[text]`) where no `el` is drawn.
+- Added the terminal's `visible` event to tool cards (`TUI.addVisibilityListener`, `TUI.terminalVisible`, `ToolNativeVisibleEvent`); it is pane-level, delivered on change only.
+
+### Fixed
+
+- Fixed 60 Hz `redescribe` bursts: requests in one tick now cost one description per card, a native redescribe no longer rebuilds a card's rows (and its tool's `renderCall`/`renderResult`), and a finished card whose tool answers `onNativeEvent` is no longer settled, so each change is a minimal `set` instead of a `del` and `add` of its whole view.
+- Bounded the backend's memory of blobs the terminal holds (512 newest ids).
 
 ## [18.12.1] - 2026-10-17
 

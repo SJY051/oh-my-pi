@@ -178,6 +178,30 @@ export function describedKeypaths(root: NativeNode, include: (node: NativeNode) 
 	return out;
 }
 
+/**
+ * The keypath (as an event reports it) of each described node under `children`
+ * that `include` accepts, counted from a root whose children these are: a
+ * view's body, before it is handed to the card that holds it.
+ */
+export function keypathsOf(
+	children: readonly NativeChild[] | undefined,
+	include: (node: NativeNode) => boolean,
+): Map<NativeNode, string> {
+	const out = new Map<NativeNode, string>();
+	const visit = (list: readonly NativeChild[] | undefined, keypath: string): void => {
+		if (!list) return;
+		const paths = childPaths(list, keypath);
+		list.forEach((child, i) => {
+			if (isComponent(child)) return;
+			const path = paths[i]!;
+			if (include(child)) out.set(child, path.split("/").map(unescapeKey).join("/"));
+			visit(child.c, path);
+		});
+	};
+	visit(children, "");
+	return out;
+}
+
 /** Stand-ins for `el` nodes in a terminal that draws none, so the same node object stays the same node object. */
 const elStandIns = new WeakMap<NativeNode, NativeNode>();
 

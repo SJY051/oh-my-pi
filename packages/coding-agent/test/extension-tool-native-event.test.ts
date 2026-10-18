@@ -57,6 +57,39 @@ describe("extension tool onNativeEvent", () => {
 		expect(calls[0]?.ctx.cwd).toBe("/project");
 	});
 
+	test("text edits and pane visibility reach the hook as they are, in order", async () => {
+		const seen: ToolNativeEvent[] = [];
+		const [tool] = await wrapTools(pi => {
+			pi.registerTool({
+				name: "form",
+				label: "Form",
+				description: "interactive form",
+				parameters: pi.arktype({}),
+				execute: async () => okResult,
+				onNativeEvent: event => {
+					seen.push(event);
+				},
+			});
+		});
+		const hook = (tool as { onNativeEvent?: (event: ToolNativeEvent) => unknown }).onNativeEvent;
+		if (!hook) throw new Error("onNativeEvent missing on the wrapped tool");
+		const base = { toolCallId: "call-1", args: {}, result: undefined };
+		const edit: ToolNativeEvent = { ...base, type: "edit", key: "form/name", value: "Ada", cursor: 3 };
+		const submit: ToolNativeEvent = {
+			...base,
+			type: "action",
+			key: "form/name",
+			act: "submit",
+			value: "Ada",
+			mods: [],
+		};
+		const hidden: ToolNativeEvent = { ...base, type: "visible", key: "", visible: false };
+
+		for (const event of [edit, submit, hidden]) await hook(event);
+		expect(seen).toEqual([edit, submit, hidden]);
+		expect(seen[0]).toBe(edit);
+	});
+
 	test("a tool without the hook stays without it, so its card knows to ignore events", async () => {
 		const [tool] = await wrapTools(pi => {
 			pi.registerTool({

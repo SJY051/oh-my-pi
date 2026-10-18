@@ -942,14 +942,16 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/**
 	 * What the user does in an interactive card of this tool's
 	 * {@link describeCall}/{@link describeResult} view, on a terminal that draws
-	 * `el` nodes (Tern): a click on an `el` node that has `actions` (`action`) or a
-	 * flip of a checkbox/radio (`change`).
+	 * `el` nodes (Tern): a click on an `el` node that has `actions` (`action`), a
+	 * flip of a checkbox/radio (`change`), typing in a text field (`edit`, with the
+	 * whole text) and Enter in a single-line one (`action` named `submit`, `value`
+	 * the text), and the terminal's pane being hidden or shown (`visible`).
 	 * `event.toolCallId` names the call whose card the user acted on; only that
 	 * card's events reach this hook for it.
 	 * Runs with the extension context, so it can start a turn with
 	 * `pi.sendMessage(..., { deliverAs: "followUp", triggerTurn: true })` or
 	 * `pi.sendUserMessage`. When it returns (or its promise settles) the card is
-	 * described again, so state it changed shows. A throw is logged and ignored.
+	 * described again (not after `visible`), so state it changed shows. A throw is logged and ignored.
 	 */
 	onNativeEvent?: (event: ToolNativeEvent, ctx: ExtensionContext) => void | Promise<void>;
 }
@@ -957,8 +959,10 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 export type {
 	ToolNativeActionEvent,
 	ToolNativeChangeEvent,
+	ToolNativeEditEvent,
 	ToolNativeEvent,
 	ToolNativeEventBase,
+	ToolNativeVisibleEvent,
 } from "@oh-my-pi/pi-tui/tools/renderer";
 
 /** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */

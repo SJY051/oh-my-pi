@@ -796,11 +796,11 @@ export default function (pi: ExtensionAPI) {
 
 Tern itself drops `url()` and `position: fixed` and reports unsupported CSS. Cards whose `sheet` text is identical share one stylesheet. A terminal without the `styles` feature draws the elements with Tern's defaults.
 
-**Events.** `onNativeEvent(event, ctx)` runs, with the extension context, when the user clicks an element that has `actions`, or flips a checkbox/radio:
+**Events.** `onNativeEvent(event, ctx)` runs, with the extension context, when the user clicks an element that has `actions`, flips a checkbox/radio, types in a text field of the view (see [Text fields](#interactive-tool-views-tern-el)), or the terminal's pane is hidden or shown:
 
 | Field | Meaning |
 | --- | --- |
-| `type` | `"action"` (a click; `act` is the action name, `value` the part after `=` in `act=value`, `mods` the held modifier keys) or `"change"` (a control flip; `name`, `value`, `checked`) |
+| `type` | `"action"` (a click; `act` is the action name, `value` the part after `=` in `act=value`, `mods` the held modifier keys; Enter in a single-line text field is the action `submit` with `value` the text), `"change"` (a control flip; `name`, `value`, `checked`), `"edit"` (a text field changed; `value` the whole text, `cursor` the caret as a UTF-16 offset) or `"visible"` (the pane was hidden or shown; `visible`; `key` is `""`) |
 | `toolCallId` | The call whose card was acted on. Each card's events reach only that call; keep per-card state in a `Map` keyed by it |
 | `key` | The acted-on node as the `/`-joined `key`s (index when a node has none) from the body down, e.g. `"form/send"`. Give every node you act on a key of your own; an empty key is ignored. When both `describeCall` and `describeResult` draw `el` nodes, keys must be unique across the two |
 | `values` | The enclosing `form`'s controls right then: a radio group gives its checked `value` (or `null`), a lone checkbox `true`/`false`, checkboxes sharing a name the checked `value`s |
@@ -814,7 +814,7 @@ When the hook returns (or its promise settles) omp describes the card again, so 
 pi.redescribeToolCards(toolName: string, toolCallId?: string): void
 ```
 
-With `toolCallId`, only that call's card is described again; without it, every card of `toolName` in the transcript. Only tools this extension registered are addressed. The call returns at once and never throws: a tool that is not yours, a name or id no card shows, a card that is gone (disposed by a transcript rebuild), and a mode with no transcript (print, RPC) are all ignored. Keep the state your view reads in your own objects (a `Map` keyed by `toolCallId`), update it first, then ask:
+With `toolCallId`, only that call's card is described again; without it, every card of `toolName` in the transcript. Only tools this extension registered are addressed. The call returns at once and never throws: a tool that is not yours, a name or id no card shows, a card that is gone (disposed by a transcript rebuild), and a mode with no transcript (print, RPC) are all ignored. Requests made in one tick are coalesced, so a job that touches ten cards costs one description each. Keep the state your view reads in your own objects (a `Map` keyed by `toolCallId`), update it first, then ask:
 
 ```ts
 setInterval(() => {
@@ -823,7 +823,39 @@ setInterval(() => {
 }, 1000);
 ```
 
-**Limits and degradation.** A view is held to 2 000 nodes, 24 levels and 64 KiB of CSS (the terminal allows 200 000 nodes, 64 levels and 256 KiB for the whole surface); one budget counts every node of the view, whatever its kind; nodes past a limit are dropped, an unknown tag draws as a `div`, attributes outside the list and the terminal's own `sf`/`sf-*` classes are removed, and an `el` `input` that is not a checkbox or radio is dropped. Where `el` cannot be drawn (a plain terminal, `PI_TUI_NATIVE=0`, a Tern build without the `el` kind, or before Tern's `hello` reply) the view shows `NativeToolView.fallback` in place of its `body`, or, without one, the elements read as text (`[x] Urgent`, `(•) Large`, `[Send]`, a text field as `[its text]`, an image as its `alt`); in a plain terminal the card's result text is replaced the same way. A tool whose view has no `el` nodes is unaffected. `el` draws no raw HTML and runs no JavaScript.
+**Many updates a second.** `redescribeToolCards` may be called up to about 60 times a second for one card (a page mirrored into the transcript). A request only marks the card dirty; the description is made when the surface next renders, at most once per frame and only while the terminal has acknowledged the frames before, so a burst costs one `describeResult` per frame, never one per call, and the agent loop is never waited on. Give every node a stable `key`: the terminal then receives only the props and text that changed. A card whose tool has `onNativeEvent` is never "settled" by the transcript (a settled block is resent whole when it changes), and the tool's own `renderCall`/`renderResult` rows are not rebuilt for a native terminal on each request.
+
+**Text fields and images** (example):
+
+```ts
+import { editorField, el, imageBytes, inputField } from "@oh-my-pi/pi-tui/native/describe";
+
+describeResult(_r, o) {
+  const s = state.get(o.toolCallId ?? "");
+  return { body: [el("form", {}, [
+    inputField({ value: s.name, placeholder: "Name" }, "name"),
+    imageBytes(s.png, "image/png", { alt: "Preview", w: 96, h: 64 }, "shot"),
+  ], "form")] };
+},
+onNativeEvent(e) {
+  if (e.type === "edit") state.get(e.toolCallId).name = e.value;          // the whole text, every change
+  if (e.type === "action" && e.act === "submit") send(e.value);            // Enter in a single-line field
+},
+```
+
+**Text fields.** `inputField(props, key)` (one line) and `editorField(props, key)` (several; Enter inserts a line break and nothing submits) may sit anywhere in a view, including inside `el` nodes. Give each a `key`: its key path names it in events and holds its text between descriptions. Props: `value`, `placeholder`, `readonly`, `keepFocus` (`input`: keep the keys after Enter), `maxLines` (`editor`, at most 64) and the layout props `tone hidden grow shrink basis min max title aria`; every other prop (`cursor`, `prompt`, `actions`, `role`, …) is dropped. Text is held to 64 KiB, what the user types included. The editing is the composer's own (caret and word keys, kill ring, undo, paste, IME, and the terminal's selection edits, which need the `edit` feature omp already asks Tern for).
+
+*Events.* Every change (typing, paste, a selection edit) calls `onNativeEvent` with `{ type: "edit", key, value, cursor }`, `value` being the whole text. Enter in an `input` calls it with `{ type: "action", act: "submit", key, value, mods: [] }`; there is no `values` for a text field, so track controls through their `change` events. Update your state synchronously in the hook and return it from the next `describeResult`.
+
+*Controlled value.* The text lives in the card. `value` replaces it (caret to the end) only when it differs from the `value` you gave last time; a description that repeats the old value never overwrites what the user typed meanwhile.
+
+*Focus.* The user clicks the field (the terminal's `focus` event); from then on every key goes to the field and none reaches the composer. Enter (unless `keepFocus`), Esc, a click in the composer, the field leaving the view, or the card being disposed give the keys back to the composer. A `readonly` field never takes them.
+
+**Images from bytes.** `imageBytes(bytes, mime, { alt, w, h, … }, key)` (the node `{ k: "image", p: { bytes, mime, w?, h?, alt? } }`) shows a picture without a file: PNG, JPEG, GIF, WebP or `image/svg+xml`. omp uploads it with the terminal's blob protocol (`b`, feature `blobs`), once per content hash (equal bytes in one card or many are one upload, and an id the terminal already holds is not sent), and forgets blob ids beyond the 512 newest, so a card that swaps pictures all day stays bounded (an id forgotten and shown again is sent again). Caps: 2 MiB per image, 256 KiB for an SVG (Tern mounts no larger one), 8 MiB per card across its call and result views, a picture counted once however often it is shown. An image over a cap, with another type, or empty is replaced by its `alt` text and logged. A terminal that draws no `el` or no images shows `alt`.
+
+**Pane visibility.** When Tern hides the pane (another tab) or shows it again, every card of your tool that draws its interactive view gets `{ type: "visible", visible, key: "", toolCallId, args, result }` once per change (no redescribe follows). The terminal reports it for the pane, not per card, so a card scrolled out of sight stays "visible"; a card starts out visible, and a hidden pane's unacknowledged frames merge on their own, so pausing expensive work is the extension's choice.
+
+**Limits and degradation.** A view is held to 2 000 nodes, 24 levels and 64 KiB of CSS (the terminal allows 200 000 nodes, 64 levels and 256 KiB for the whole surface); one budget counts every node of the view, whatever its kind; nodes past a limit are dropped, an unknown tag draws as a `div`, attributes outside the list and the terminal's own `sf`/`sf-*` classes are removed, and an `el` `input` that is not a checkbox or radio is dropped (text entry is [`inputField`](#interactive-tool-views-tern-el)). Where `el` cannot be drawn (a plain terminal, `PI_TUI_NATIVE=0`, a Tern build without the `el` kind, or before Tern's `hello` reply) the view shows `NativeToolView.fallback` in place of its `body`, or, without one, the elements read as text (`[x] Urgent`, `(•) Large`, `[Send]`, a text field as `[its text]`, an image as its `alt`); in a plain terminal the card's result text is replaced the same way. A tool whose view has no `el` nodes is unaffected. `el` draws no raw HTML and runs no JavaScript.
 
 ### File write fallback (`registerFileWriteFallback`)
 

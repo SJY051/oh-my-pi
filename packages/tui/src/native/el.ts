@@ -18,8 +18,10 @@ import {
 	type TspCommonProps,
 	type TspElAttr,
 	type TspElTag,
+	type TspProps,
 } from "@oh-my-pi/pi-wire";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { nativeImageNode } from "./blobs";
 import { node } from "./describe";
 import type { NativeChild, NativeNode } from "./node";
 
@@ -32,6 +34,22 @@ export const EL_MAX_VIEW_NODES = TSP_MAX_SURFACE_NODES / 100;
 export const EL_MAX_VIEW_DEPTH = TSP_MAX_DEPTH / 2 - 8;
 /** Largest stylesheet one tool view may carry: a quarter of the surface's {@link TSP_MAX_SURFACE_CSS_BYTES}, which all its sheets share. */
 export const EL_MAX_SHEET_BYTES = TSP_MAX_SURFACE_CSS_BYTES / 4;
+/** Largest raster image (PNG, JPEG, GIF, WebP) a tool view may give as `bytes`. */
+export const TOOL_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+/** Largest SVG a tool view may give as `bytes`: Tern mounts no SVG over 256 KiB. */
+export const TOOL_SVG_MAX_BYTES = 256 * 1024;
+/** Most image bytes one card may show across its call and result views; the same picture twice counts once. */
+export const TOOL_VIEW_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+/** Longest text a tool view's text field may hold, in UTF-16 units; what the user types is held to it too. */
+export const TOOL_FIELD_MAX_CHARS = 64 * 1024;
+/** The image types Tern decodes. */
+const IMAGE_MIMES: Record<string, true> = {
+	"image/png": true,
+	"image/jpeg": true,
+	"image/gif": true,
+	"image/webp": true,
+	"image/svg+xml": true,
+};
 /** Longest action name, class list, attribute value and form field name kept. */
 const MAX_TOKEN_CHARS = 256;
 /** Most entries kept in an `attrs` table or a `menu`. */
@@ -86,8 +104,9 @@ function isNativeNode(child: NativeChild): child is NativeNode {
 }
 
 /**
- * Whether any described node under `children` is an `el`, the node the tool-view
- * sanitizer handles. Components are opaque. Iterative and bounded: a view too
+ * Whether any described node under `children` is one the tool-view sanitizer
+ * handles: an `el`, a text-entry node (`input`, `editor`) or an `image` that
+ * carries `bytes`. Components are opaque. Iterative and bounded: a view too
  * big to scan counts as holding one, so the sanitizer (which prunes) runs on it.
  */
 export function containsEl(children: readonly NativeChild[] | undefined): boolean {
@@ -97,7 +116,7 @@ export function containsEl(children: readonly NativeChild[] | undefined): boolea
 	while (pending.length > 0) {
 		for (const child of pending.pop()!) {
 			if (!isNativeNode(child)) continue;
-			if (child.k === "el") return true;
+			if (child.k === "el" || child.k === "input" || child.k === "editor" || hasBytes(child)) return true;
 			if (++visited > EL_MAX_VIEW_NODES * 4) return true;
 			if (child.c) pending.push(child.c);
 		}
@@ -105,9 +124,21 @@ export function containsEl(children: readonly NativeChild[] | undefined): boolea
 	return false;
 }
 
+/** What the images of one card have spent of {@link TOOL_VIEW_IMAGE_MAX_BYTES}: distinct pictures by blob id. */
+export interface ViewImageBudget {
+	bytes: number;
+	ids: Set<string>;
+}
+
+/** A fresh {@link ViewImageBudget}: the call and result views of one card share one. */
+export function newViewImageBudget(): ViewImageBudget {
+	return { bytes: 0, ids: new Set() };
+}
+
 interface Budget {
 	nodes: number;
 	problems: Set<string>;
+	images: ViewImageBudget;
 }
 
 function sanitizeAttrs(attrs: unknown, budget: Budget): Record<string, TspElAttr> | undefined {
@@ -270,6 +301,89 @@ function copyCommonProps(
 	}
 }
 
+/** Common props a text field or an image accepts: no `role` (a field must not take the composer's look), `href` or `mark`. */
+const FIELD_COMMON_KEYS = ["tone", "hidden", "grow", "shrink", "basis", "min", "max", "title", "aria"] as const;
+const IMAGE_COMMON_KEYS = ["tone", "hidden", "grow", "shrink", "basis", "min", "title"] as const;
+
+/**
+ * A text field of a tool view (`input`, or `editor` for several lines) reduced
+ * to the data omp keeps: the text and its placeholder, `readonly`, `keepFocus`
+ * and the layout props. Typing and caret state live in the card (see
+ * `CardField`), never in the view, so no `cursor`, `anchor`, `decor`, `prompt`,
+ * `ghost`, `mode` or `actions` reaches the terminal from the tool.
+ */
+function sanitizeField(child: NativeNode, key: string | undefined, budget: Budget): NativeNode {
+	const raw = (child.p ?? {}) as Record<string, unknown>;
+	const out: Record<string, unknown> = {};
+	const value = typeof raw.value === "string" ? raw.value : typeof raw.text === "string" ? raw.text : undefined;
+	if (value !== undefined) {
+		if (value.length > TOOL_FIELD_MAX_CHARS) budget.problems.add(`field text longer than ${TOOL_FIELD_MAX_CHARS}`);
+		out.value = value.slice(0, TOOL_FIELD_MAX_CHARS);
+	}
+	if (typeof raw.placeholder === "string") out.placeholder = raw.placeholder.slice(0, MAX_TOKEN_CHARS);
+	if (typeof raw.readonly === "boolean") out.readonly = raw.readonly;
+	if (typeof raw.keepFocus === "boolean") out.keepFocus = raw.keepFocus;
+	if (child.k === "editor" && typeof raw.maxLines === "number" && Number.isFinite(raw.maxLines) && raw.maxLines > 0) {
+		out.maxLines = Math.min(Math.trunc(raw.maxLines), 64);
+	}
+	copyCommonProps(raw, out, FIELD_COMMON_KEYS);
+	return { k: child.k, p: out, ...(key === undefined ? {} : { key }) } as NativeNode;
+}
+
+/** Whether `child` is an `image` that carries its bytes (a tool view's way to show a picture). */
+function hasBytes(child: NativeNode): boolean {
+	return child.k === "image" && child.p !== undefined && "bytes" in child.p && child.p.bytes instanceof Uint8Array;
+}
+
+/** What stands where an image is refused: its alt text, so the view still reads. */
+function imageStandIn(alt: string | undefined, key: string | undefined): NativeNode {
+	return node("text", { text: alt === undefined || alt === "" ? "[image omitted]" : alt }, undefined, key);
+}
+
+/**
+ * An `image` given as `bytes` + `mime`, turned into a blob image (content
+ * addressed, so equal bytes upload once) when it fits the caps; otherwise its
+ * alt text takes its place and the reason is logged.
+ */
+function sanitizeImage(child: NativeNode, key: string | undefined, budget: Budget): NativeNode {
+	const raw = (child.p ?? {}) as Record<string, unknown>;
+	const bytes = raw.bytes;
+	const alt = typeof raw.alt === "string" ? raw.alt.slice(0, MAX_TOKEN_CHARS * 2) : undefined;
+	if (!(bytes instanceof Uint8Array)) return imageStandIn(alt, key);
+	const mime = raw.mime;
+	if (typeof mime !== "string" || !Object.hasOwn(IMAGE_MIMES, mime)) {
+		budget.problems.add(`image mime ${String(mime)} is not allowed`);
+		return imageStandIn(alt, key);
+	}
+	const limit = mime === "image/svg+xml" ? TOOL_SVG_MAX_BYTES : TOOL_IMAGE_MAX_BYTES;
+	if (bytes.byteLength === 0 || bytes.byteLength > limit) {
+		budget.problems.add(`${mime} image of ${bytes.byteLength} bytes (limit ${limit})`);
+		return imageStandIn(alt, key);
+	}
+	const props: Omit<TspProps<"image">, "blob" | "builtin"> = {};
+	if (alt !== undefined) props.alt = alt;
+	for (const dimension of ["w", "h"] as const) {
+		const value = raw[dimension];
+		if (typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 16_384) props[dimension] = value;
+	}
+	if (typeof raw.max === "object" && raw.max !== null) props.max = raw.max as TspProps<"image">["max"];
+	copyCommonProps(raw, props as Record<string, unknown>, IMAGE_COMMON_KEYS);
+	const image = nativeImageNode(bytes, mime, props, key);
+	const id = image.k === "image" ? image.p?.blob : undefined;
+	if (id === undefined) return image;
+	const spent = budget.images;
+	// The same picture twice is one blob: it counts once.
+	if (!spent.ids.has(id)) {
+		if (spent.bytes + bytes.byteLength > TOOL_VIEW_IMAGE_MAX_BYTES) {
+			budget.problems.add(`images over ${TOOL_VIEW_IMAGE_MAX_BYTES} bytes in one card`);
+			return imageStandIn(alt, key);
+		}
+		spent.ids.add(id);
+		spent.bytes += bytes.byteLength;
+	}
+	return image;
+}
+
 function sanitizeChild(child: NativeChild, depth: number, budget: Budget): NativeChild | undefined {
 	// A component describes itself; only described nodes are untrusted data.
 	if (!isNativeNode(child)) return child;
@@ -285,6 +399,8 @@ function sanitizeChild(child: NativeChild, depth: number, budget: Budget): Nativ
 	budget.nodes++;
 	// An empty key would give the node the id of its component's root.
 	const key = typeof child.key === "string" && child.key !== "" ? child.key : undefined;
+	if (child.k === "input" || child.k === "editor") return sanitizeField(child, key, budget);
+	if (child.k === "image" && hasBytes(child)) return sanitizeImage(child, key, budget);
 	if (child.k !== "el") {
 		const { key: _key, c, ...rest } = child;
 		const kept = { ...rest, ...(key === undefined ? {} : { key }) } as NativeNode;
@@ -330,12 +446,21 @@ function sanitizeChildren(children: readonly NativeChild[] | undefined, depth: n
  * attribute allowlist, the terminal's own classes removed, `input` only as a
  * checkbox or radio, no children under `input`/`hr`, and the view held to
  * {@link EL_MAX_VIEW_NODES} nodes, {@link EL_MAX_VIEW_DEPTH} levels and
- * {@link EL_MAX_SHEET_BYTES} of CSS per sheet. What exceeds a cap is dropped,
- * never truncated mid-node. Returns `children` itself when it holds no `el`.
+ * {@link EL_MAX_SHEET_BYTES} of CSS per sheet. Text-entry nodes (`input`,
+ * `editor`) are reduced to the props a tool may set ({@link sanitizeField}), and
+ * an `image` carrying `bytes` becomes a blob image held to the
+ * {@link TOOL_IMAGE_MAX_BYTES} and {@link TOOL_VIEW_IMAGE_MAX_BYTES} caps
+ * (`images` is the budget the view's other sides already spent). What exceeds a
+ * cap is dropped, never truncated mid-node. Returns `children` itself when it
+ * holds none of these.
  */
-export function sanitizeElChildren(children: readonly NativeChild[], context: string): readonly NativeChild[] {
+export function sanitizeElChildren(
+	children: readonly NativeChild[],
+	context: string,
+	images: ViewImageBudget = newViewImageBudget(),
+): readonly NativeChild[] {
 	if (!containsEl(children)) return children;
-	const budget: Budget = { nodes: 0, problems: new Set() };
+	const budget: Budget = { nodes: 0, problems: new Set(), images };
 	const out = sanitizeChildren(children, 0, budget);
 	if (budget.problems.size > 0) logger.warn("TSP: el view adjusted", { context, problems: [...budget.problems] });
 	return out;
@@ -667,6 +792,30 @@ function plainOf(child: NativeChild): string {
 
 function emit(child: NativeChild, out: TextOut): void {
 	if (!isNativeNode(child)) return;
+	if (child.k === "input" || child.k === "editor") {
+		// A text field reads as its text, or its placeholder while empty: `[Name]`, an editor's lines on their own.
+		const props: Record<string, unknown> = { ...child.p };
+		const shown = typeof props.value === "string" ? props.value : typeof props.text === "string" ? props.text : "";
+		const body = shown === "" && typeof props.placeholder === "string" ? props.placeholder : shown;
+		if (child.k === "input") {
+			out.line += `[${body.replace(/\s+/g, " ").trim()}] `;
+		} else {
+			flushLine(out);
+			for (const line of body.split("\n")) {
+				out.line = line;
+				flushLine(out);
+			}
+		}
+		return;
+	}
+	if (child.k === "image") {
+		// Where the picture can't be drawn its alt text stands in (a plain terminal has nothing else).
+		const alt = child.p?.alt;
+		flushLine(out);
+		out.line = alt === undefined || alt === "" ? "[image]" : alt;
+		flushLine(out);
+		return;
+	}
 	if (child.k !== "el") {
 		const own = ownText(child);
 		if (own !== "") {
@@ -707,8 +856,8 @@ function emit(child: NativeChild, out: TextOut): void {
 /**
  * The readable text of a view's nodes, for terminals that draw no `el`: one
  * line per block element, `- ` before list items, `[x]`/`[ ]` checkboxes,
- * `(•)`/`( )` radios, `[Label]` buttons, cells joined with ` | `. Empty when
- * `children` has no text.
+ * `(•)`/`( )` radios, `[Label]` buttons, `[text]` single-line fields, an
+ * image's alt text, cells joined with ` | `. Empty when `children` has no text.
  */
 export function elFallbackText(children: readonly NativeChild[]): string {
 	const out: TextOut = { lines: [], line: "" };
@@ -718,7 +867,8 @@ export function elFallbackText(children: readonly NativeChild[]): string {
 }
 
 /**
- * `children` with every `el` subtree replaced by a `text` node of its
+ * `children` with every `el` subtree (and every text field of the view, which
+ * only an `el`-drawing terminal can show) replaced by a `text` node of its
  * {@link elFallbackText} (one with no text is dropped); other nodes are kept as they are.
  */
 export function replaceElWithText(children: readonly NativeChild[] | undefined): NativeChild[] {
@@ -726,7 +876,7 @@ export function replaceElWithText(children: readonly NativeChild[] | undefined):
 	for (const child of children ?? []) {
 		if (!isNativeNode(child) || !containsEl([child])) {
 			out.push(child);
-		} else if (child.k === "el") {
+		} else if (child.k === "el" || child.k === "input" || child.k === "editor") {
 			const plain = elFallbackText([child]);
 			if (plain !== "") out.push(node("text", { text: plain }, undefined, child.key));
 		} else {

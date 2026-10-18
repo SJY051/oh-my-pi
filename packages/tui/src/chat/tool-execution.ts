@@ -23,6 +23,7 @@ import {
 } from "../tools/index";
 import { describeDefaultToolExecution, formatDefaultToolExecution } from "../tools/default-renderer";
 import { INTENT_FIELD, type TspCardStatus, type TspPreview, type TspText, type TspTone } from "@oh-my-pi/pi-wire";
+import { CardField, type CardFieldHost } from "../native/card-field";
 import { card, col, EMPTY_NODE, node, span, text, withHidden } from "../native/describe";
 import {
 	type DescribeContext,
@@ -35,6 +36,8 @@ import { plainText } from "../native/spans";
 import { diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
 import {
 	containsEl,
+	newViewImageBudget,
+	type ViewImageBudget,
 	EL_MAX_SHEET_BYTES,
 	elActionName,
 	elFallbackText,
@@ -42,7 +45,7 @@ import {
 	sanitizeElChildren,
 	scopedView,
 } from "../native/el";
-import { describedKeypaths } from "../native/reconcile";
+import { describedKeypaths, keypathsOf } from "../native/reconcile";
 import type { FileDiagnosticsResult } from "../tools/lsp";
 import { NativeImageCache, readMediaPath, shownMedia } from "../native/blobs";
 import { imageLinksEnabled, linkedImageText } from "../prompt/image-references";
@@ -155,6 +158,8 @@ const VIEW_SCOPE_KEY = /^view-(?:call|result)\/root\/(.+)$/;
  * {@link ToolExecutionComponent.redescribe} finds the cards it addresses here.
  */
 const liveCards = new Set<WeakRef<ToolExecutionComponent>>();
+/** The uis whose visibility events the cards already watch (see `ToolExecutionComponent.#watchVisibility`). */
+const visibilityWatched = new WeakSet<ToolExecutionUi>();
 const collectedCards = new FinalizationRegistry<WeakRef<ToolExecutionComponent>>(ref => liveCards.delete(ref));
 
 class SafeToolRendererComponent implements Component {
@@ -242,6 +247,10 @@ export interface ToolExecutionUi {
 	requestComponentRender(component: Component): void;
 	resetDisplay(): void;
 	imageBudget?: TUI["imageBudget"];
+	/** Hand the keys a clicked-into field holds back to where they were (the composer); absent: nothing is handed back. */
+	releaseFocus?(component: Component): void;
+	/** Observe the terminal's pane being hidden or shown; returns the unsubscribe. */
+	addVisibilityListener?(listener: (visible: boolean) => void): () => void;
 }
 
 export interface ToolExecutionOptions {
@@ -497,6 +506,16 @@ export class ToolExecutionComponent extends Container {
 	#disposed = false;
 	/** This card's entry in {@link liveCards}. */
 	readonly #cardRef = new WeakRef(this);
+	/** A re-describe is queued for the end of the current tick. */
+	#redescribeQueued = false;
+	/** The last description drew the view's `el` nodes (the terminal supports them): events and visibility reach its tool. */
+	#hasView = false;
+	/** The text fields of the view, by side, kind and key path (see {@link CardField}). */
+	readonly #fields = new Map<string, CardField>();
+	/** The fields the description in progress used; the rest are dropped when it ends. */
+	readonly #fieldsSeen = new Set<string>();
+	/** A native redescribe left the rows display behind; the next rows paint rebuilds it. */
+	#displayStale = false;
 	// LSP diagnostics that arrived after the result (native only), shown in the frame.
 	#lateDiagnostics: readonly FileDiagnosticsResult[] | undefined;
 	readonly #nativeImages = new NativeImageCache();
@@ -565,6 +584,7 @@ export class ToolExecutionComponent extends Container {
 		this.setIgnoreTight(true);
 
 		liveCards.add(this.#cardRef);
+		ToolExecutionComponent.#watchVisibility(ui);
 		collectedCards.register(this, this.#cardRef);
 		this.#updateSpinnerAnimation();
 		this.#updateDisplay();
@@ -889,6 +909,15 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * A card whose tool answers `onNativeEvent` goes on changing after it finishes
+	 * (typing, a timer, a mirrored page), so the transcript never settles it: a
+	 * settled card's change is sent as a `del` and `add` of its whole body.
+	 */
+	keepsNativeLive(): boolean {
+		return (this.#tool as NativeEventTool | undefined)?.onNativeEvent !== undefined;
+	}
+
+	/**
 	 * Subagent ids visible on this card for click-to-focus hit-testing. Empty
 	 * unless this is a task card whose details already name spawned agents.
 	 * Callers intersect with the live registry, which decides focusability.
@@ -947,6 +976,9 @@ export class ToolExecutionComponent extends Container {
 	override dispose(): void {
 		this.#disposed = true;
 		liveCards.delete(this.#cardRef);
+		// A focused field gives the keys back before its card is gone.
+		for (const field of this.#fields.values()) field.dispose();
+		this.#fields.clear();
 		this.stopAnimation();
 		super.dispose();
 	}
@@ -1060,24 +1092,66 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
+	/** What a text field of the view reports and asks of the card (see {@link CardFieldHost}). */
+	readonly #fieldHost: CardFieldHost = {
+		requestRender: () => this.#ui.requestRender(),
+		releaseFocus: field => this.#ui.releaseFocus?.(field),
+		onEdit: (key, value, cursor) => this.#dispatchToolEvent(base => ({ ...base, type: "edit", key, value, cursor })),
+		onSubmit: (key, value) =>
+			this.#dispatchToolEvent(base => ({ ...base, type: "action", key, act: "submit", value, mods: [] })),
+	};
+
+	/** The terminal's pane was hidden or shown: tell the tool, for a card that draws its interactive view. */
+	#deliverVisible(visible: boolean): void {
+		if (!this.#hasView) return;
+		this.#dispatchToolEvent(base => ({ ...base, type: "visible", visible }), false);
+	}
+
+	/** Tell the cards of `ui` when the terminal's pane is hidden or shown again; once per ui, however many cards it has. */
+	static #watchVisibility(ui: ToolExecutionUi): void {
+		if (visibilityWatched.has(ui) || ui.addVisibilityListener === undefined) return;
+		visibilityWatched.add(ui);
+		ui.addVisibilityListener(visible => {
+			for (const ref of liveCards) {
+				const card = ref.deref();
+				if (card === undefined) liveCards.delete(ref);
+				else if (card.#ui === ui) card.#deliverVisible(visible);
+			}
+		});
+	}
+
 	/**
 	 * Describe this card again at the next frame: its view may read differently
 	 * from the last time. Only versions change here; the description itself is
-	 * made when the surface next renders.
+	 * made when the surface next renders (at most once a frame, and only while
+	 * the terminal has credit), so a burst of requests costs one description.
+	 * Rows, which a native terminal never paints, catch up when next asked for.
 	 */
 	#redescribeNow(): void {
 		if (this.#disposed) return;
 		this.#blockVersion++;
 		this.#displayInputVersion++;
-		this.invalidate();
+		if (isNativeRendering()) this.#displayStale = true;
+		else this.invalidate();
 		this.#ui.requestRender();
+	}
+
+	/** As {@link #redescribeNow} at the end of the current tick, once however many requests arrive before it. */
+	#queueRedescribe(): void {
+		if (this.#disposed || this.#redescribeQueued) return;
+		this.#redescribeQueued = true;
+		queueMicrotask(() => {
+			this.#redescribeQueued = false;
+			this.#redescribeNow();
+		});
 	}
 
 	/**
 	 * Ask the cards of `ui` that show a call of `toolName` (only `toolCallId`'s
 	 * when given) to describe themselves again, for an extension whose tool's
 	 * view changed outside an `onNativeEvent` (a background job finished). A
-	 * card that is gone, or a name or id no card shows, is skipped.
+	 * card that is gone, or a name or id no card shows, is skipped; several
+	 * requests in one tick cost one description per card.
 	 */
 	static redescribe(ui: ToolExecutionUi, toolName: string, toolCallId?: string): void {
 		for (const ref of liveCards) {
@@ -1089,7 +1163,7 @@ export class ToolExecutionComponent extends Container {
 				card.#toolName === toolName &&
 				(toolCallId === undefined || card.#toolCallId === toolCallId)
 			) {
-				card.#redescribeNow();
+				card.#queueRedescribe();
 			}
 		}
 	}
@@ -1168,8 +1242,8 @@ export class ToolExecutionComponent extends Container {
 				dataFirst ? this.#describeTool(media, elSupported) : this.#describeCard(media, elSupported),
 				!this.#toolActivityVisible,
 			);
-			const hasView = this.#sawEl && elSupported;
-			this.#liveKeys = hasView ? describedKeypaths(described, n => n.k === "el") : new Set();
+			this.#hasView = this.#sawEl && elSupported;
+			this.#liveKeys = this.#hasView ? describedKeypaths(described, n => n.k === "el") : new Set();
 			return described;
 		});
 	}
@@ -1342,17 +1416,23 @@ export class ToolExecutionComponent extends Container {
 	 * needs, or — where the terminal draws no `el` — replaced by its fallback text.
 	 * Each side has its own stylesheet; the two never share a scope.
 	 */
-	#prepareView(view: NativeToolView, side: "call" | "result", elSupported: boolean): NativeToolView {
+	#prepareView(
+		view: NativeToolView,
+		side: "call" | "result",
+		elSupported: boolean,
+		images: ViewImageBudget,
+	): NativeToolView {
 		if (!containsEl(view.body)) return view;
 		this.#sawEl = true;
-		const body = sanitizeElChildren(view.body ?? [], this.#toolName);
+		const sanitized = sanitizeElChildren(view.body ?? [], this.#toolName, images);
 		if (!elSupported) {
 			return {
 				...view,
-				body: view.fallback === undefined ? replaceElWithText(body) : [text(view.fallback)],
+				body: view.fallback === undefined ? replaceElWithText(sanitized) : [text(view.fallback)],
 				sheet: undefined,
 			};
 		}
+		const body = this.#materializeFields(sanitized, side);
 		let sheet = view.sheet;
 		if (sheet !== undefined && Buffer.byteLength(sheet) > EL_MAX_SHEET_BYTES) {
 			logger.warn("Tool stylesheet dropped", { tool: this.#toolName, limit: EL_MAX_SHEET_BYTES });
@@ -1363,11 +1443,58 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	/**
+	 * `body` with each text field node (`input`, `editor`) of the view replaced by
+	 * the {@link CardField} that edits it: one component per key path, kept
+	 * across descriptions so the user's text, caret and focus survive them.
+	 */
+	#materializeFields(body: readonly NativeChild[], side: "call" | "result"): readonly NativeChild[] {
+		const paths = keypathsOf(body, n => n.k === "input" || n.k === "editor");
+		if (paths.size === 0) return body;
+		const swap = (list: readonly NativeChild[]): NativeChild[] =>
+			list.map(child => {
+				if (!("k" in child)) return child;
+				const path = paths.get(child);
+				if (path !== undefined && (child.k === "input" || child.k === "editor")) {
+					const id = `${side}/${child.k}/${path}`;
+					let field = this.#fields.get(id);
+					if (field === undefined) {
+						field = new CardField(child.k, path, this.#fieldHost);
+						this.#fields.set(id, field);
+					}
+					this.#fieldsSeen.add(id);
+					field.apply({ ...child.p });
+					return field;
+				}
+				return child.c === undefined ? child : ({ ...child, c: swap(child.c) } as NativeNode);
+			});
+		return swap(body);
+	}
+
+	/** Drop (and release the keys of) the fields the last description of an `el`-drawing terminal no longer holds. */
+	#pruneFields(): void {
+		for (const [id, field] of this.#fields) {
+			if (this.#fieldsSeen.has(id)) continue;
+			this.#fields.delete(id);
+			field.dispose();
+		}
+	}
+
+	/** The renderer's semantic view, with the text fields of an `el`-drawing terminal kept in step with it. */
+	#nativeView(media: boolean, elSupported: boolean): NativeToolView {
+		this.#fieldsSeen.clear();
+		try {
+			return this.#buildNativeView(media, elSupported, newViewImageBudget());
+		} finally {
+			if (elSupported) this.#pruneFields();
+		}
+	}
+
+	/**
 	 * The renderer's semantic view: the call view until a result exists, then
 	 * the result view (merged renderers) or the call head over both bodies.
 	 * A renderer that throws falls back to the generic card.
 	 */
-	#nativeView(media: boolean, elSupported: boolean): NativeToolView {
+	#buildNativeView(media: boolean, elSupported: boolean, images: ViewImageBudget): NativeToolView {
 		this.#sawEl = false;
 		const status = this.#nativeStatus();
 		const options: RenderResultContextOptions = {
@@ -1400,9 +1527,9 @@ export class ToolExecutionComponent extends Container {
 						args,
 					)
 				: undefined;
-			const resultView = rawResult && this.#prepareView(rawResult, "result", elSupported);
+			const resultView = rawResult && this.#prepareView(rawResult, "result", elSupported, images);
 			const rawCall = !result || !merged || !resultView ? renderer.describeCall?.(args, options) : undefined;
-			const callView = rawCall && this.#prepareView(rawCall, "call", elSupported);
+			const callView = rawCall && this.#prepareView(rawCall, "call", elSupported, images);
 			if (merged || !callView || !resultView) {
 				return resultView ?? callView ?? { head: [span(this.#toolLabel, "toolTitle")] };
 			}
@@ -1537,6 +1664,11 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override render(width: number): readonly string[] {
+		if (this.#displayStale) {
+			// A native redescribe skipped the rows rebuild; this is the first rows paint since.
+			this.#displayStale = false;
+			this.#updateDisplay();
+		}
 		if (!this.#toolActivityVisible || this.#allocation === 0 || (this.#toolName === "wait" && this.#isBenignSkip())) {
 			return [];
 		}

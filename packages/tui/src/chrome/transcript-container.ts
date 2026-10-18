@@ -63,6 +63,13 @@ interface FinalizableBlock {
 	 * repainted, so retiring early would freeze a placeholder into scrollback.
 	 */
 	isTranscriptBlockPending?(): boolean;
+	/**
+	 * A finalized block that keeps changing in a native terminal (an interactive
+	 * tool card: typing, timers, a page mirrored into it). A settled block's
+	 * change is sent as a `del` and `add` of its whole body, so such a block is
+	 * never settled and every change is a minimal diff.
+	 */
+	keepsNativeLive?(): boolean;
 	/** Render the row that must remain represented under emergency viewport pressure. */
 	renderTranscriptBlockEmergencyRow?(width: number): string | undefined;
 }
@@ -153,6 +160,11 @@ const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
 	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
+}
+
+/** Whether a finalized block goes on changing natively, so settling it would turn each change into a resend of its whole view. */
+function keepsNativeLive(component: Component): boolean {
+	return (component as Component & FinalizableBlock).keepsNativeLive?.() === true;
 }
 
 function blockMode(component: Component): TranscriptBlockMode {
@@ -944,7 +956,7 @@ export class TranscriptContainer extends Container {
 		this.#syncEntries();
 		const children = this.children;
 		for (const child of children) {
-			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
+			if (!isNativeSettled(child) && isFinalized(child) && !keepsNativeLive(child)) settleNative(child);
 		}
 		const previous = this.#nativeBlocks;
 		if (previous.length === children.length && previous.every((child, index) => child === children[index])) {
