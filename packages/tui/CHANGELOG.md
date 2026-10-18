@@ -10,11 +10,13 @@
 - Added text fields in tool views: `inputField`/`editorField` (`@oh-my-pi/pi-tui/native/describe`) are made real by the card (`CardField`, the composer's own editing): clicking one takes the keys from the composer, every change reaches the tool as an `edit` event with the whole text, Enter submits, and Enter, Esc, a click in the composer, a dropped field or a disposed card hand the keys back (`TUI.releaseFocus`).
 - Added images from bytes in tool views (`imageBytes`, or an `image` node with `bytes` and `mime`): uploaded once per content hash with TSP blobs, capped at 2 MiB per image, 256 KiB per SVG and 8 MiB per card, replaced by their `alt` text over a cap, and read as `alt` (fields as `[text]`) where no `el` is drawn.
 - Added the terminal's `visible` event to tool cards (`TUI.addVisibilityListener`, `TUI.terminalVisible`, `ToolNativeVisibleEvent`); it is pane-level, delivered on change only.
+- Tool result content annotated `audience: ["assistant"]` no longer renders in the transcript, natively or in the row renderer
 
 ### Fixed
 
 - Fixed 60 Hz `redescribe` bursts: requests in one tick now cost one description per card, a native redescribe no longer rebuilds a card's rows (and its tool's `renderCall`/`renderResult`), and a finished card whose tool answers `onNativeEvent` is no longer settled, so each change is a minimal `set` instead of a `del` and `add` of its whole view.
 - Bounded the backend's memory of blobs the terminal holds (512 newest ids).
+- Fixed the card of a tool called through `write xd://<tool>` not delivering clicks, edits or redescribe requests to the tool's `onNativeEvent` hook
 
 ## [18.12.1] - 2026-10-17
 

@@ -53,8 +53,9 @@ func (v *StopReason) UnmarshalJSON(data []byte) error {
 }
 
 type TextContent struct {
-	Text          string  `json:"text"`
-	TextSignature *string `json:"textSignature,omitempty"`
+	Text          string                     `json:"text"`
+	TextSignature *string                    `json:"textSignature,omitempty"`
+	Annotations   map[string]json.RawMessage `json:"annotations,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -70,6 +71,7 @@ func (v *TextContent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.constant("type", "text")
 	d.required("text", &out.Text)
 	d.optional("textSignature", &out.TextSignature)
+	d.optional("annotations", &out.Annotations)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err
@@ -156,6 +158,7 @@ type ImageContent struct {
 	Detail       *ImageContentDetail        `json:"detail,omitempty"`
 	URL          *string                    `json:"url,omitempty"`
 	ProviderFile map[string]json.RawMessage `json:"providerFile,omitempty"`
+	Annotations  map[string]json.RawMessage `json:"annotations,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -174,6 +177,7 @@ func (v *ImageContent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("detail", &out.Detail)
 	d.optional("url", &out.URL)
 	d.optional("providerFile", &out.ProviderFile)
+	d.optional("annotations", &out.Annotations)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err

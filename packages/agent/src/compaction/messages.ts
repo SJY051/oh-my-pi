@@ -6,6 +6,7 @@ import type {
 	TextContent,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { contentForModel } from "@oh-my-pi/pi-ai/utils/content-audience";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
 import type { SessionEntry } from "./entries";
@@ -88,17 +89,21 @@ declare module "../types" {
 export type ConvertToLlm = (messages: AgentMessage[]) => Message[];
 
 function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
+	// What the model receives: blocks meant for the user alone are left out, and so is the annotation saying so.
+	const forModel = contentForModel(message.content);
+	const source =
+		forModel.length === 0 && message.content.length > 0 ? [{ type: "text" as const, text: "(no output)" }] : forModel;
 	if (message.prunedAt === undefined) {
-		return message.content;
+		return source;
 	}
-	const textBlocks = message.content.filter((content): content is TextContent => content.type === "text");
+	const textBlocks = source.filter((content): content is TextContent => content.type === "text");
 	const text = textBlocks.map(block => block.text).join("") || "[Output truncated]";
-	const firstTextIndex = message.content.findIndex(content => content.type === "text");
-	if (firstTextIndex < 0) return [{ type: "text", text }, ...message.content];
+	const firstTextIndex = source.findIndex(content => content.type === "text");
+	if (firstTextIndex < 0) return [{ type: "text", text }, ...source];
 
 	const content: (TextContent | ImageContent)[] = [];
-	for (let index = 0; index < message.content.length; index++) {
-		const block = message.content[index];
+	for (let index = 0; index < source.length; index++) {
+		const block = source[index];
 		if (block.type !== "text") content.push(block);
 		else if (index === firstTextIndex) content.push({ type: "text", text });
 	}

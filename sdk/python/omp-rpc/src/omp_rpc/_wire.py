@@ -205,6 +205,7 @@ class TextContent(TypedDict):
     type: Literal["text"]
     text: str
     textSignature: NotRequired[str]
+    annotations: NotRequired[JsonObject]
 
 
 class ThinkingContent(TypedDict):
@@ -230,6 +231,7 @@ class ImageContent(TypedDict):
     detail: NotRequired[Literal["auto", "low", "high", "original"]]
     url: NotRequired[str]
     providerFile: NotRequired[JsonObject]
+    annotations: NotRequired[JsonObject]
 
 
 class ToolCall(TypedDict):

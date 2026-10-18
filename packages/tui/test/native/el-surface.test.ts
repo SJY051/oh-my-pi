@@ -740,3 +740,109 @@ describe("reserved action names in a tool view", () => {
 		expect(seen[0]).toMatchObject({ type: "action", act: "open", value: "draft", key: "mine" });
 	});
 });
+
+describe("a card of a tool called through a `write xd://` device", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	function deviceCard(inner: AgentTool, ui: ToolExecutionUi): ToolExecutionComponent {
+		const host = {
+			name: "write",
+			label: "Write",
+			session: { xdev: { mountedNames: new Set(["card"]), tools: new Map(), resolve: () => inner } },
+		} as unknown as AgentTool;
+		const card = new ToolExecutionComponent(
+			"write",
+			{ path: "xd://card", content: "{}" },
+			{},
+			host,
+			ui,
+			"/tmp",
+			"call-x",
+		);
+		card.setExecutionStarted("call-x");
+		card.updateResult(
+			{
+				content: [{ type: "text", text: "ok" }],
+				details: { xdev: { tool: "card", mode: "execute", args: { id: "x" }, inner: { id: "x" } } },
+			},
+			false,
+			"call-x",
+		);
+		return card;
+	}
+
+	it("hands a click to the device tool's hook with that tool's own args and details", async () => {
+		const hooks: Hooks = { seen: [], more: new Set() };
+		const { ui } = countingUi();
+		const card = deviceCard(makeTool(hooks), ui);
+		harness = await TspHarness.start(tui => tui.addChild(card), { features: FEATURES });
+		const h = harness;
+
+		h.event({ ev: "action", sf: h.terminal.surface!, id: buttonOf(h, card, "Send").id, act: "send" });
+		expect(hooks.seen).toHaveLength(1);
+		expect(hooks.seen[0]).toMatchObject({
+			toolCallId: "call-x",
+			key: "form/send",
+			args: { id: "x" },
+			result: { details: { id: "x" } },
+		});
+	});
+
+	it("is found by the device tool's name when asked to describe again", async () => {
+		const { ui, renders } = countingUi();
+		const card = deviceCard(makeTool({ seen: [], more: new Set() }), ui);
+		harness = await TspHarness.start(tui => tui.addChild(card), { features: FEATURES });
+		const before = renders();
+
+		ToolExecutionComponent.redescribe(ui, "card", "call-x");
+		await Promise.resolve();
+		expect(renders()).toBe(before + 1);
+	});
+});
+
+describe("tool result content addressed to the model", () => {
+	beforeAll(async () => {
+		await initTheme();
+	});
+
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+	const imageNodes = (h: TspHarness) => h.findAll(node => node.k === "image");
+
+	it("draws no image the model alone should see, and keeps the ones for the user", async () => {
+		const { ui } = countingUi();
+		const shown = new ToolExecutionComponent("card", {}, {}, undefined, ui, "/tmp", "call-a");
+		shown.setExecutionStarted("call-a");
+		shown.updateResult(
+			{
+				content: [
+					{ type: "text", text: "captured" },
+					{ type: "image", data: png, mimeType: "image/png", annotations: { audience: ["user"] } },
+				],
+			},
+			false,
+			"call-a",
+		);
+		harness = await TspHarness.start(tui => tui.addChild(shown), { features: [...FEATURES, "media"] });
+		const withImage = imageNodes(harness).length;
+		expect(withImage).toBeGreaterThan(0);
+		harness.stop();
+
+		const hidden = new ToolExecutionComponent("card", {}, {}, undefined, ui, "/tmp", "call-b");
+		hidden.setExecutionStarted("call-b");
+		hidden.updateResult(
+			{
+				content: [
+					{ type: "text", text: "captured" },
+					{ type: "image", data: png, mimeType: "image/png", annotations: { audience: ["assistant"] } },
+				],
+			},
+			false,
+			"call-b",
+		);
+		harness = await TspHarness.start(tui => tui.addChild(hidden), { features: [...FEATURES, "media"] });
+		expect(imageNodes(harness)).toEqual([]);
+		expect(hidden.render(80).join("\n")).not.toMatch(/image/i);
+	});
+});

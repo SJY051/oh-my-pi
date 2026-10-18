@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A tool result sent to the model leaves out content blocks annotated `audience: ["user"]` (an all-user result becomes `(no output)`) and removes the `annotations` field from the others
+
 ## [18.12.0] - 2026-10-17
 
 ### Fixed

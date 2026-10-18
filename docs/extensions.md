@@ -855,6 +855,19 @@ onNativeEvent(e) {
 
 **Pane visibility.** When Tern hides the pane (another tab) or shows it again, every card of your tool that draws its interactive view gets `{ type: "visible", visible, key: "", toolCallId, args, result }` once per change (no redescribe follows). The terminal reports it for the pane, not per card, so a card scrolled out of sight stays "visible"; a card starts out visible, and a hidden pane's unacknowledged frames merge on their own, so pausing expensive work is the extension's choice.
 
+**Tools called through a device.** A tool the model reaches with `write xd://<tool>` (discoverable tools are mounted that way) has its card in the transcript under that call. The card still draws your `describeResult`, still delivers its events to your `onNativeEvent` (with the tool's own `args` and `details`), and `redescribeToolCards` addresses it by your tool's name.
+
+**Content meant only for the model, or only for the user.** A tool result's text and image blocks accept MCP's `annotations.audience`: `["assistant"]` is for the model alone, `["user"]` for the transcript alone, and absent (or empty, or both) is for both. A block for the model is sent to the model as usual and is not drawn in the transcript, so a screenshot the tool wants the model to describe does not appear under your card. A block for the user is drawn and is not sent to the model; a result whose blocks are all for the user reaches the model as `(no output)`. The `annotations` field never reaches a provider. `describeResult`, `renderResult` and `onNativeEvent` see only the blocks the user may see; put anything the card needs in `details`.
+
+```ts
+return {
+  content: [
+    { type: "text", text: "Preview captured." },
+    { type: "image", data: png, mimeType: "image/png", annotations: { audience: ["assistant"] } },
+  ],
+};
+```
+
 **Limits and degradation.** A view is held to 2 000 nodes, 24 levels and 64 KiB of CSS (the terminal allows 200 000 nodes, 64 levels and 256 KiB for the whole surface); one budget counts every node of the view, whatever its kind; nodes past a limit are dropped, an unknown tag draws as a `div`, attributes outside the list and the terminal's own `sf`/`sf-*` classes are removed, and an `el` `input` that is not a checkbox or radio is dropped (text entry is [`inputField`](#interactive-tool-views-tern-el)). Where `el` cannot be drawn (a plain terminal, `PI_TUI_NATIVE=0`, a Tern build without the `el` kind, or before Tern's `hello` reply) the view shows `NativeToolView.fallback` in place of its `body`, or, without one, the elements read as text (`[x] Urgent`, `(•) Large`, `[Send]`, a text field as `[its text]`, an image as its `alt`); in a plain terminal the card's result text is replaced the same way. A tool whose view has no `el` nodes is unaffected. `el` draws no raw HTML and runs no JavaScript.
 
 ### File write fallback (`registerFileWriteFallback`)

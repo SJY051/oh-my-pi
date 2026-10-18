@@ -141,6 +141,7 @@ impl StopReason {
 pub struct TextContent {
 	pub text: Option<String>,
 	pub text_signature: Option<String>,
+	pub annotations: Option<Map<String, Value>>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -154,10 +155,14 @@ impl Serialize for TextContent {
 		if let Some(value) = &self.text_signature {
 			map.serialize_entry("textSignature", value)?;
 		}
+		if let Some(value) = &self.annotations {
+			map.serialize_entry("annotations", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"text" if self.text.is_some() => continue,
 				"textSignature" if self.text_signature.is_some() => continue,
+				"annotations" if self.annotations.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -172,6 +177,7 @@ impl<'de> Deserialize<'de> for TextContent {
 		Ok(Self {
 			text: take(&mut extra, "text"),
 			text_signature: take(&mut extra, "textSignature"),
+			annotations: take(&mut extra, "annotations"),
 			extra,
 		})
 	}
@@ -283,6 +289,7 @@ pub struct ImageContent {
 	pub detail: Option<ImageContentDetail>,
 	pub url: Option<String>,
 	pub provider_file: Option<Map<String, Value>>,
+	pub annotations: Option<Map<String, Value>>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -308,6 +315,9 @@ impl Serialize for ImageContent {
 		if let Some(value) = &self.provider_file {
 			map.serialize_entry("providerFile", value)?;
 		}
+		if let Some(value) = &self.annotations {
+			map.serialize_entry("annotations", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"type" if self.r#type.is_some() => continue,
@@ -316,6 +326,7 @@ impl Serialize for ImageContent {
 				"detail" if self.detail.is_some() => continue,
 				"url" if self.url.is_some() => continue,
 				"providerFile" if self.provider_file.is_some() => continue,
+				"annotations" if self.annotations.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -334,6 +345,7 @@ impl<'de> Deserialize<'de> for ImageContent {
 			detail: take(&mut extra, "detail"),
 			url: take(&mut extra, "url"),
 			provider_file: take(&mut extra, "providerFile"),
+			annotations: take(&mut extra, "annotations"),
 			extra,
 		})
 	}

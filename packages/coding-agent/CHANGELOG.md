@@ -14,6 +14,7 @@
 - Added `pi.redescribeToolCards(toolName, toolCallId?)` so an extension can have OMP describe its tool cards again from outside `onNativeEvent` (a timer, a finished background job); it is ignored for tools the extension does not own, unknown cards and modes without a transcript; see `docs/extensions.md`
 - An `el` action named `toggle`, `copy`, `open` or `zoom` is no longer swallowed by Tern: OMP sends it under another name and gives `onNativeEvent` the name the view wrote; `open`/`copy` on an element with an `href` stay Tern's own
 - Added text fields (`inputField`, `editorField`), images from bytes (`imageBytes`) and pane visibility to interactive tool cards: `onNativeEvent` now also receives `edit` (the whole text), `submit` (an `action`; Enter in a single-line field) and `visible` events (`ToolNativeEditEvent`, `ToolNativeVisibleEvent`). See `docs/extensions.md`.
+- Added `annotations.audience` on tool result text and image blocks: `["assistant"]` keeps a block (a screenshot the model should describe) out of the transcript while the model still receives it, `["user"]` shows it without sending it to the model; the RPC wire types carry the field
 
 ### Changed
 
@@ -36,6 +37,7 @@
 - Commands in `bash` can hand `skill://`, `local://`, and other file-backed URLs to external programs again (`python skill://example-skill/tool.py "query"`), and can run them from a `cd`'d writable URL directory such as `local://`; a URL the provider rejects, such as an unknown skill, now fails the command with the provider's error ([#14838](https://github.com/can1357/oh-my-pi/pull/14838) by [@koyzdev](https://github.com/koyzdev))
 - Fixed `computer.apps.open` returning before the app had a window, or never giving a hidden running app one; it now returns the app's frontmost window as `window`, waiting up to 3 s on macOS ([#15184](https://github.com/can1357/oh-my-pi/pull/15184) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed a key you were typing on macOS arriving twice or more when omp exited after computer use ([#15562](https://github.com/can1357/oh-my-pi/pull/15562) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the transcript card of a tool the model calls through `write xd://<tool>` ignoring that tool's `onNativeEvent` hook and `redescribeToolCards`: the card now delivers events to the mounted tool, with the tool's own arguments and details
 
 ## [18.12.1] - 2026-10-17
 

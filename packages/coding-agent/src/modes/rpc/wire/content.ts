@@ -17,7 +17,7 @@ export const messageDefs = {
 	Attribution: doc("'user' | 'agent'", "Who initiated a message, for billing and attribution."),
 	StopReason: "'stop' | 'length' | 'toolUse' | 'error' | 'aborted'",
 
-	TextContent: { type: "'text'", text: "string", "textSignature?": "string" },
+	TextContent: { type: "'text'", text: "string", "textSignature?": "string", "annotations?": JSON_OBJECT },
 	ThinkingContent: {
 		type: "'thinking'",
 		thinking: "string",
@@ -37,6 +37,7 @@ export const messageDefs = {
 			"detail?": "'auto' | 'low' | 'high' | 'original'",
 			"url?": "string",
 			"providerFile?": JSON_OBJECT,
+			"annotations?": JSON_OBJECT,
 		},
 		"Inline image; also the shape hosts send with prompts.",
 	),

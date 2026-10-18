@@ -874,10 +874,25 @@ export interface TextSignatureV1 {
 	phase?: "commentary" | "final_answer";
 }
 
+/** Who a content block is meant for, as in MCP's `audience` annotation. */
+export type ContentAudience = "user" | "assistant";
+
+/**
+ * MCP-style annotations on a tool result's content block. `audience` names who
+ * the block is for: `["assistant"]` reaches only the model (the transcript does
+ * not draw it), `["user"]` only the transcript (the model does not receive it).
+ * Absent or empty means both. Providers never see the field.
+ */
+export interface ContentAnnotations {
+	audience?: readonly ContentAudience[];
+}
+
 export interface TextContent {
 	type: "text";
 	text: string;
 	textSignature?: string; // e.g., for OpenAI responses, message metadata (legacy id string or TextSignatureV1 JSON)
+	/** Who this text is for; see {@link ContentAnnotations}. */
+	annotations?: ContentAnnotations;
 }
 
 export interface ThinkingContent {
@@ -978,6 +993,8 @@ export interface ImageContent {
 	 * turn differs byte-wise).
 	 */
 	url?: string;
+	/** Who this image is for; see {@link ContentAnnotations}. */
+	annotations?: ContentAnnotations;
 }
 
 export type ComputerAction =

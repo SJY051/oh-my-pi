@@ -780,6 +780,11 @@
 				},
 				"textSignature": {
 					"type": "string"
+				},
+				"annotations": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
 				}
 			},
 			"required": [
@@ -856,6 +861,11 @@
 					"type": "string"
 				},
 				"providerFile": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {}
+				},
+				"annotations": {
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}

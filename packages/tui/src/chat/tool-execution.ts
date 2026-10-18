@@ -1,4 +1,5 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { ContentAnnotations, ImageContent } from "@oh-my-pi/pi-ai";
+import { contentForUser } from "@oh-my-pi/pi-ai/utils/content-audience";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
 import { SPINNER_ADVANCE_MS } from "../components/loader";
@@ -61,7 +62,8 @@ import {
 	replaceTabs,
 	resolveImageOptions,
 } from "../render/render-utils";
-import type { XdevMountedState } from "../tools/xdev";
+import type { XdevMountedState, XdevRenderDispatch } from "../tools/xdev";
+import { parseXdUrl } from "../tools/xd-url";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { FenceFigure } from "./fence-figure";
@@ -261,7 +263,14 @@ export interface ToolExecutionOptions {
 
 /** A tool result or progress frame as a card shows it. */
 export interface ToolResultFrame {
-	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+	content: Array<{
+		type: string;
+		text?: string;
+		data?: string;
+		mimeType?: string;
+		/** Who the block is for; a block for the model alone is not drawn. */
+		annotations?: ContentAnnotations;
+	}>;
 	details?: unknown;
 	isError?: boolean;
 }
@@ -456,7 +465,7 @@ export class ToolExecutionComponent extends Container {
 	#renderer?: ToolRenderer;
 	#ui: ToolExecutionUi;
 	#result?: {
-		content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+		content: ToolResultFrame["content"];
 		isError?: boolean;
 		details?: unknown;
 	};
@@ -701,7 +710,10 @@ export class ToolExecutionComponent extends Container {
 		// Renderers receive sanitized details for display; raw paths are available
 		// separately for links and media through the built-in render context.
 		const details = sanitizeTextDeep(result.details);
-		this.#result = details === result.details ? result : { ...result, details };
+		// The transcript draws only what is meant for the user: a block annotated for the model alone stays out of every view.
+		const content = contentForUser(result.content);
+		this.#result =
+			details === result.details && content === result.content ? result : { ...result, details, content };
 		this.#resultVersion++;
 		this.#blockVersion++;
 		this.#isPartial = isPartial;
@@ -914,7 +926,7 @@ export class ToolExecutionComponent extends Container {
 	 * settled card's change is sent as a `del` and `add` of its whole body.
 	 */
 	keepsNativeLive(): boolean {
-		return (this.#tool as NativeEventTool | undefined)?.onNativeEvent !== undefined;
+		return this.#eventTool()?.onNativeEvent !== undefined;
 	}
 
 	/**
@@ -1054,16 +1066,18 @@ export class ToolExecutionComponent extends Container {
 	 * for a card whose tool has no hook, or that was disposed.
 	 */
 	#dispatchToolEvent(make: (base: ToolNativeEventBase) => ToolNativeEvent, redescribe = true): void {
-		const tool = this.#tool as NativeEventTool | undefined;
+		const tool = this.#eventTool();
 		const toolCallId = this.#toolCallId;
 		if (!tool?.onNativeEvent || toolCallId === undefined || this.#disposed) return;
+		const dispatch = this.#xdevDispatch();
 		const toolEvent = make({
 			toolCallId,
 			key: "",
-			args: this.#args,
+			// A device call's view belongs to the tool it ran: hand the hook that call's own arguments and details.
+			args: dispatch?.args ?? this.#args,
 			result: this.#result && {
 				content: this.#result.content,
-				details: this.#result.details,
+				details: dispatch ? dispatch.inner : this.#result.details,
 				isError: this.#result.isError,
 			},
 		});
@@ -1146,6 +1160,39 @@ export class ToolExecutionComponent extends Container {
 		});
 	}
 
+	/** For a `write xd://<tool>` call that ran, the dispatch it made: the card shows that tool's view. */
+	#xdevDispatch(): XdevRenderDispatch | undefined {
+		if (this.#toolName !== "write") return undefined;
+		const details = this.#result?.details;
+		const dispatch = isRecord(details) ? details.xdev : undefined;
+		// Dispatch metadata the host wrote into the result; only its tool name is checked here.
+		return isRecord(dispatch) && typeof dispatch.tool === "string"
+			? (dispatch as unknown as XdevRenderDispatch)
+			: undefined;
+	}
+
+	/** The tool whose view this card draws: its own, or the one a `write xd://<tool>` call addresses. */
+	#deviceName(): string | undefined {
+		if (this.#toolName !== "write") return undefined;
+		const dispatched = this.#xdevDispatch()?.tool;
+		if (dispatched !== undefined) return dispatched;
+		const path = isRecord(this.#args) ? this.#args.path : undefined;
+		return typeof path === "string" ? (parseXdUrl(path)?.name ?? undefined) : undefined;
+	}
+
+	/**
+	 * The object whose `onNativeEvent` serves this card: the tool itself, or for
+	 * a device call the mounted tool the host resolves the device name to (the
+	 * `write` tool that carries the call has no view of its own).
+	 */
+	#eventTool(): NativeEventTool | undefined {
+		const own = this.#tool as NativeEventTool | undefined;
+		if (own?.onNativeEvent) return own;
+		const device = this.#deviceName();
+		const host = this.#tool as { session?: { xdev?: XdevMountedState } } | undefined;
+		return device === undefined ? undefined : (host?.session?.xdev?.resolve?.(device) as NativeEventTool | undefined);
+	}
+
 	/**
 	 * Ask the cards of `ui` that show a call of `toolName` (only `toolCallId`'s
 	 * when given) to describe themselves again, for an extension whose tool's
@@ -1160,7 +1207,7 @@ export class ToolExecutionComponent extends Container {
 				liveCards.delete(ref);
 			} else if (
 				card.#ui === ui &&
-				card.#toolName === toolName &&
+				(card.#toolName === toolName || card.#deviceName() === toolName) &&
 				(toolCallId === undefined || card.#toolCallId === toolCallId)
 			) {
 				card.#queueRedescribe();

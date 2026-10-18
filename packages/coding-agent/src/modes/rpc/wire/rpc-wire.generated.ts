@@ -9,6 +9,7 @@ export interface TextContent {
 	type: "text";
 	text: string;
 	textSignature?: string;
+	annotations?: Record<string, unknown>;
 }
 
 export interface ThinkingContent {
@@ -34,6 +35,7 @@ export interface ImageContent {
 	detail?: "auto" | "low" | "high" | "original";
 	url?: string;
 	providerFile?: Record<string, unknown>;
+	annotations?: Record<string, unknown>;
 }
 
 export interface ToolCall {
